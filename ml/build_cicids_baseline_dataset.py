@@ -51,14 +51,10 @@ def main():
     args = parse_arguments()
     os.makedirs(args.output_dir, exist_ok=True)
 
-    print("Loading and concatenating CSV files...")
     df = load_and_concatenate_csvs(args.csv_dir)
-
     if args.max_rows and args.max_rows > 0:
         df = df.sample(n=args.max_rows, random_state=args.seed).reset_index(drop=True)
         print("Sampled:", df.shape)
-    else:
-        print("Dataset loaded with shape:", df.shape)
 
     label_col = pick_label_col(df)
     print(f"Using '{label_col}' as the label column.")
@@ -67,9 +63,14 @@ def main():
     
     # TODO: Further feature engineering can be added here
     drop_like = {
-        "Flow_ID", "Src_IP", "Dst_IP", "Timestamp", "Fwd_Header_Length",
-        "Bwd_Header_Length", "Fwd_PSH_Flags", "Bwd_PSH_Flags",
-        "Fwd_URG_Flags", "Bwd_URG_Flags"
+        label_col, "is_attack",
+        "Flow_ID", "FlowID",
+        "Source_IP", "Destination_IP", "Src_IP", "Dst_IP",
+        "Source_Port", "Destination_Port", "Src_Port", "Dst_Port",
+        "Timestamp", "Protocol",
+        "Fwd_Header_Length", "Bwd_Header_Length",
+        "Fwd_PSH_Flags", "Bwd_PSH_Flags",
+        "Fwd_URG_Flags", "Bwd_URG_Flags",
     }
     feat_df = df.drop(columns=[c for c in df.columns if c in drop_like], errors="ignore")
 
