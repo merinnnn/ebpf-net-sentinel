@@ -19,7 +19,7 @@ sudo apt-get install -y \
   python3 python3-pip python3-venv
 
 # Install bpftool from source (latest stable)
-echo "[*] Installing bpftool from source..."
+echo "[*] bpftool provided by linux-tools-$(uname -r)"
 sudo apt-get install -y bpfcc-tools || true
 
 # Sanity check installations
