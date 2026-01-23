@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import argparse
 import os
 import glob
@@ -6,10 +7,10 @@ import pandas as pd
 import numpy as np
 
 def parse_arguments():
-    parser = argparse.ArgumentParser(description="Build CICIDS Baseline Dataset")
-    parser.add_argument('--csv_dir', type=str, required=True, help='Directory containing raw CSV files')
+    parser = argparse.ArgumentParser(description="Build CICIDS2017 Baseline Dataset")
+    parser.add_argument('--csv_dir', type=str, required=True, help='Directory containing raw CICIDS CSV files')
     parser.add_argument('--output_dir', type=str, required=True, help='Output directory for the baseline dataset')
-    parser.add_argument("--max_rows", type=int, default=0, help="Optional cap for quick tests")
+    parser.add_argument("--max_rows", type=int, default=0, help="Optional cap for quick tests (random sample)")
     parser.add_argument("--seed", type=int, default=42, help="Seed for sampling")
     parser.add_argument("--format", choices=["csv", "parquet"], default="csv", help="Output format")
     parser.add_argument("--out_name", type=str, default="cicids2017_baseline_clean", help="Base output filename (no ext)")
@@ -102,8 +103,8 @@ def main():
     else:
         out.to_parquet(out_path, index=False)
 
-    cols_path = os.path.join(args.output_dir, "cicids_baseline_columns.txt")
-    with open(cols_path, "w") as f:
+    cols_path = os.path.join(args.output_dir, "baseline_features.txt")
+    with open(cols_path, "w", encoding="utf-8") as f:
         for c in feat_df.columns:
             f.write(c + "\n")
 
