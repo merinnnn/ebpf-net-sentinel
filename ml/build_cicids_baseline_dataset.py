@@ -34,7 +34,6 @@ def load_and_concatenate_csvs(csv_dir) -> pd.DataFrame:
         df = pd.read_csv(file, encoding="utf-8", low_memory=False)
         df.columns = clean_column_names(df.columns)
         df_list.append(df)
-        # log each file
         print(f"Loaded {os.path.basename(file)} -> {df.shape}")
 
     combined_df = pd.concat(df_list, ignore_index=True)
@@ -47,17 +46,7 @@ def pick_label_col(df: pd.DataFrame) -> str:
             return cand
     raise ValueError("No Label column found in CICIDS files.")
 
-def main():
-    args = parse_arguments()
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    df = load_and_concatenate_csvs(args.csv_dir)
-    if args.max_rows and args.max_rows > 0:
-        df = df.sample(n=args.max_rows, random_state=args.seed).reset_index(drop=True)
-        print("Sampled:", df.shape)
-
-    label_col = pick_label_col(df)
-    print(f"Using '{label_col}' as the label column.")
+def build_feature_frame(df: pd.DataFrame, label_col: str) -> pd.DataFrame:
     df[label_col] = df[label_col].astype(str).str.strip()
     df["is_attack"] = (df[label_col].str.upper() != "BENIGN").astype(int)
     
@@ -87,6 +76,21 @@ def main():
                 numeric_cols.append(col)
 
     feat_df = feat_df[numeric_cols].fillna(0.0)
+    return feat_df
+
+def main():
+    args = parse_arguments()
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    df = load_and_concatenate_csvs(args.csv_dir)
+    if args.max_rows and args.max_rows > 0:
+        df = df.sample(n=args.max_rows, random_state=args.seed).reset_index(drop=True)
+        print("Sampled:", df.shape)
+
+    label_col = pick_label_col(df)
+    print(f"Using '{label_col}' as the label column.")
+
+    feat_df = build_feature_frame(df, label_col)
 
     out = feat_df.copy()
     out["Label"] = df[label_col]
