@@ -54,7 +54,13 @@ sudo apt-get update
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y zeek-core zeek-client
 
 # Verify Zeek installation
-zeek --version || /opt/zeek/bin/zeek --version
+# Verify Zeek installation (and fix PATH if needed)
+if [[ -x /opt/zeek/bin/zeek ]] && ! command -v zeek >/dev/null 2>&1; then
+  sudo ln -sf /opt/zeek/bin/zeek /usr/local/bin/zeek
+fi
+
+zeek --version
+
 echo "[*] Zeek installation complete."
 
 # Usage
