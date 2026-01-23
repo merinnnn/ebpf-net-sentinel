@@ -18,4 +18,12 @@ sudo apt-get install -y \
 
 sudo apt-get install -y bpfcc-tools || true
 
+# Sanity check installations
+echo "[*] Verifying installations..."
+gcc --version
+bpftool version
+clang --version
+tcpdump --version
+tcpreplay --version
+
 echo "[*] Base Ubuntu eBPF tooling setup complete."
