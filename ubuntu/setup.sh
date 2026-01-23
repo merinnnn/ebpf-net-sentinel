@@ -10,10 +10,12 @@ sudo apt-get update
 sudo apt-get install -y \
   git build-essential clang llvm make pkg-config \
   linux-headers-$(uname -r) \
-  bpftool libbpf-dev libelf-dev zlib1g-dev \
+  linux-tools-common linux-tools-generic linux-tools-$(uname -r) \
+  libbpf-dev libelf-dev zlib1g-dev \
   golang \
-  zeek \
   tcpreplay tcpdump \
   python3 python3-pip python3-venv
 
-echo "[*] Ubuntu setup complete."
+sudo apt-get install -y bpfcc-tools || true
+
+echo "[*] Base Ubuntu eBPF tooling setup complete."
