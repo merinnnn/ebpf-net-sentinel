@@ -27,3 +27,20 @@ tcpdump --version
 tcpreplay --version
 
 echo "[*] Base Ubuntu eBPF tooling setup complete."
+
+# Add Zeek repo for xUbuntu 20.04
+echo "deb http://download.opensuse.org/repositories/security:/zeek/xUbuntu_20.04/ /" \
+  | sudo tee /etc/apt/sources.list.d/zeek.list > /dev/null
+
+# Add the signing key
+curl -fsSL "https://download.opensuse.org/repositories/security:/zeek/xUbuntu_20.04/Release.key" \
+  | gpg --dearmor \
+  | sudo tee /etc/apt/trusted.gpg.d/zeek.gpg > /dev/null
+
+sudo apt-get update
+sudo apt-get install -y zeek
+
+# Verify Zeek installation
+zeek --version
+
+echo "[*] Zeek installation complete."
