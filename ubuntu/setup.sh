@@ -44,3 +44,8 @@ sudo apt-get install -y zeek
 zeek --version
 
 echo "[*] Zeek installation complete."
+
+# Usage
+# bash setup.sh
+# or
+# chmod +x setup.sh && ./setup.sh
