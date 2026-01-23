@@ -10,7 +10,7 @@ def parse_arguments():
     parser.add_argument('--csv_dir', type=str, required=True, help='Directory containing raw CSV files')
     parser.add_argument('--output_dir', type=str, required=True, help='Output directory for the baseline dataset')
     parser.add_argument("--max_rows", type=int, default=0, help="Optional cap for quick tests")
-
+    parser.add_argument("--seed", type=int, default=42, help="Seed for sampling")
     parser.add_argument("--format", choices=["csv", "parquet"], default="csv", help="Output format")
     parser.add_argument("--out_name", type=str, default="cicids2017_baseline_clean", help="Base output filename (no ext)")
     return parser.parse_args()
@@ -24,18 +24,21 @@ def clean_column_names(cols):
         out.append(c)
     return out
 
-def load_and_concatenate_csvs(csv_dir, max_rows=0) -> pd.DataFrame:
+def load_and_concatenate_csvs(csv_dir) -> pd.DataFrame:
     all_files = sorted(glob.glob(os.path.join(csv_dir, "*.csv")))
     if not all_files:
         raise FileNotFoundError(f"No CSV files found in directory: {csv_dir}")
+
     df_list = []
     for file in all_files:
         df = pd.read_csv(file, encoding="utf-8", low_memory=False)
         df.columns = clean_column_names(df.columns)
         df_list.append(df)
+        # log each file
+        print(f"Loaded {os.path.basename(file)} -> {df.shape}")
+
     combined_df = pd.concat(df_list, ignore_index=True)
-    if max_rows > 0:
-        combined_df = combined_df.head(max_rows)
+    print("Concatenated:", combined_df.shape)
     return combined_df
 
 def pick_label_col(df: pd.DataFrame) -> str:
@@ -49,8 +52,13 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     print("Loading and concatenating CSV files...")
-    df = load_and_concatenate_csvs(args.csv_dir, args.max_rows)
-    print("Dataset loaded with shape:", df.shape)
+    df = load_and_concatenate_csvs(args.csv_dir)
+
+    if args.max_rows and args.max_rows > 0:
+        df = df.sample(n=args.max_rows, random_state=args.seed).reset_index(drop=True)
+        print("Sampled:", df.shape)
+    else:
+        print("Dataset loaded with shape:", df.shape)
 
     label_col = pick_label_col(df)
     print(f"Using '{label_col}' as the label column.")
