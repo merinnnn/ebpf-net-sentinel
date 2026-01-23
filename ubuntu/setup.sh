@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# RUN ONCE: Setup Ubuntu for eBPF development
 sudo apt-get update
+sudo apt-get install -y software-properties-common ca-certificates curl gnupg
+sudo add-apt-repository -y universe
+sudo apt-get update
+
 sudo apt-get install -y \
   git build-essential clang llvm make pkg-config \
   linux-headers-$(uname -r) \
