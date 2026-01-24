@@ -31,24 +31,33 @@ def main():
     feat_cols = [c for c in df.columns if c not in drop_cols and pd.api.types.is_numeric_dtype(df[c])]
     X = df[feat_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0).to_numpy(dtype=np.float32)
 
-    X_train, X_test, y_train, y_test = train_test_split(
+    # 60/20/20 stratified split
+    X_temp, X_test, y_temp, y_test = train_test_split(
         X, y, test_size=0.2, random_state=args.seed, stratify=y
+    )
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_temp, y_temp, test_size=0.25, random_state=args.seed, stratify=y_temp
     )
 
     X_train_b = X_train[y_train == 0]
 
     scaler = StandardScaler()
     X_train_b_s = scaler.fit_transform(X_train_b)
+    X_val_s = scaler.transform(X_val)
     X_test_s = scaler.transform(X_test)
 
     model = IsolationForest(random_state=args.seed, n_estimators=200, n_jobs=-1)
     model.fit(X_train_b_s)
 
-    test_scores = -model.decision_function(X_test_s)
-    test_auc = roc_auc_score(y_test, test_scores)
+    def score(m, Xs):
+        return -m.decision_function(Xs)
+
+    val_scores = score(model, X_val_s)
+    test_scores = score(model, X_test_s)
 
     metrics = {
-        "test_auc": float(test_auc),
+        "val_auc": float(roc_auc_score(y_val, val_scores)),
+        "test_auc": float(roc_auc_score(y_test, test_scores)),
         "n_features": len(feat_cols),
         "seed": args.seed,
         "label_col": args.label_col,
