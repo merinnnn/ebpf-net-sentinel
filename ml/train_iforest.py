@@ -11,6 +11,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, f1_score, precision_recall_fscore_support
 from sklearn.preprocessing import StandardScaler
 
+# TODO: implement chunked reading for large CSVs
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", required=True)
