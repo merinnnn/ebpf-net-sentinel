@@ -8,7 +8,7 @@ import joblib
 
 from sklearn.ensemble import IsolationForest
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, f1_score, precision_recall_fscore_support
 from sklearn.preprocessing import StandardScaler
 
 def main():
