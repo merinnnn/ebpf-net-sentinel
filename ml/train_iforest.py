@@ -46,24 +46,49 @@ def main():
     X_val_s = scaler.transform(X_val)
     X_test_s = scaler.transform(X_test)
 
-    model = IsolationForest(random_state=args.seed, n_estimators=200, n_jobs=-1)
-    model.fit(X_train_b_s)
+    def score(model, Xs):
+        return -model.decision_function(Xs)
 
-    def score(m, Xs):
-        return -m.decision_function(Xs)
+    grid = []
+    for n_estimators in [200, 400]:
+        for max_samples in [0.2, 0.5, 1.0]:
+            for contamination in [0.01, 0.02, 0.05]:
+                grid.append((n_estimators, max_samples, contamination))
 
-    val_scores = score(model, X_val_s)
-    test_scores = score(model, X_test_s)
+    best_auc = -1.0
+    best_params = None
+    best_model = None
+
+    for n_est, max_s, cont in grid:
+        model = IsolationForest(
+            n_estimators=n_est,
+            max_samples=max_s,
+            contamination=cont,
+            random_state=args.seed,
+            n_jobs=-1
+        )
+        model.fit(X_train_b_s)
+        val_scores = score(model, X_val_s)
+        auc = roc_auc_score(y_val, val_scores)
+
+        if auc > best_auc:
+            best_auc = auc
+            best_params = {"n_estimators": n_est, "max_samples": max_s, "contamination": cont}
+            best_model = model
+
+    test_scores = score(best_model, X_test_s)
+    test_auc = roc_auc_score(y_test, test_scores)
 
     metrics = {
-        "val_auc": float(roc_auc_score(y_val, val_scores)),
-        "test_auc": float(roc_auc_score(y_test, test_scores)),
+        "best_params": best_params,
+        "val_auc": float(best_auc),
+        "test_auc": float(test_auc),
         "n_features": len(feat_cols),
         "seed": args.seed,
         "label_col": args.label_col,
     }
 
-    joblib.dump(model, os.path.join(args.outdir, "model.joblib"))
+    joblib.dump(best_model, os.path.join(args.outdir, "model.joblib"))
     joblib.dump(scaler, os.path.join(args.outdir, "scaler.joblib"))
     with open(os.path.join(args.outdir, "features.json"), "w") as f:
         json.dump(feat_cols, f, indent=2)
