@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -27,6 +28,27 @@ type Event struct {
 	StateNew uint32
 	Bytes    uint64
 	Comm     [16]byte
+}
+
+type FlowKey struct {
+	Saddr uint32
+	Daddr uint32
+	Sport uint16
+	Dport uint16
+	Proto uint8
+}
+
+type FlowAgg struct {
+	FirstTsNs    uint64
+	LastTsNs     uint64
+	BytesSent    uint64
+	BytesRecv    uint64
+	Retransmits  uint64
+	StateChanges uint64
+	PidMode      uint32
+	UidMode      uint32
+	CommMode     string
+	Samples      uint64
 }
 
 func main() {
@@ -68,6 +90,10 @@ func main() {
 	must(err)
 	defer rd.Close()
 
+	// Aggregation store
+	var mu sync.Mutex
+	flows := map[FlowKey]*FlowAgg{}
+
 	// Graceful shutdown (Ctrl+C)
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
@@ -77,6 +103,9 @@ func main() {
 		select {
 		case <-stop:
 			fmt.Println("[*] stopping...")
+			mu.Lock()
+			fmt.Printf("[*] tracked flows in memory: %d\n", len(flows))
+			mu.Unlock()
 			return
 		default:
 			rec, err := rd.Read()
@@ -90,8 +119,46 @@ func main() {
 			var e Event
 			must(binary.Read(bytes.NewBuffer(rec.RawSample), binary.LittleEndian, &e))
 
-			fmt.Printf("ev=%d pid=%d uid=%d %d:%d -> %d:%d bytes=%d comm=%q\n",
-				e.Evtype, e.Pid, e.Uid, e.Saddr, e.Sport, e.Daddr, e.Dport, e.Bytes, cstr(e.Comm[:]))
+			key := FlowKey{
+				Saddr: e.Saddr,
+				Daddr: e.Daddr,
+				Sport: e.Sport,
+				Dport: e.Dport,
+				Proto: e.Proto,
+			}
+
+			mu.Lock()
+			a := flows[key]
+			if a == nil {
+				a = &FlowAgg{
+					FirstTsNs: e.TsNs,
+					LastTsNs:  e.TsNs,
+					PidMode:   e.Pid,
+					UidMode:   e.Uid,
+					CommMode:  cstr(e.Comm[:]),
+				}
+				flows[key] = a
+			}
+
+			if e.TsNs < a.FirstTsNs {
+				a.FirstTsNs = e.TsNs
+			}
+			if e.TsNs > a.LastTsNs {
+				a.LastTsNs = e.TsNs
+			}
+			a.Samples++
+
+			switch e.Evtype {
+			case 2:
+				a.BytesSent += e.Bytes
+			case 3:
+				a.BytesRecv += e.Bytes
+			case 4:
+				a.Retransmits++
+			case 1:
+				a.StateChanges++
+			}
+			mu.Unlock()
 		}
 	}
 }
