@@ -1,5 +1,6 @@
 // netmon.bpf.c (CO-RE minimal)
 #include "vmlinux.h"
+#include <bpf/bpf_tracing.h>
 #include <bpf/bpf_helpers.h>
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
