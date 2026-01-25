@@ -5,6 +5,9 @@ import (
 	"encoding/binary"
 	"flag"
 	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
@@ -65,17 +68,31 @@ func main() {
 	must(err)
 	defer rd.Close()
 
-	fmt.Println("[*] netmon running; generating events on TCP state changes")
-	for {
-		rec, err := rd.Read()
-		if err != nil {
-			continue
-		}
-		var e Event
-		must(binary.Read(bytes.NewBuffer(rec.RawSample), binary.LittleEndian, &e))
-		fmt.Printf("ev=%d pid=%d uid=%d %d:%d -> %d:%d bytes=%d comm=%q\n", 
-			e.Evtype, e.Pid, e.Uid, e.Saddr, e.Sport, e.Daddr, e.Dport, e.Bytes, cstr(e.Comm[:]))
+	// Graceful shutdown (Ctrl+C)
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
+	fmt.Println("[*] netmon running; generating events on TCP state changes (Ctrl+C to stop)")
+	for {
+		select {
+		case <-stop:
+			fmt.Println("[*] stopping...")
+			return
+		default:
+			rec, err := rd.Read()
+			if err != nil {
+				if err == ringbuf.ErrClosed {
+					return
+				}
+				continue
+			}
+
+			var e Event
+			must(binary.Read(bytes.NewBuffer(rec.RawSample), binary.LittleEndian, &e))
+
+			fmt.Printf("ev=%d pid=%d uid=%d %d:%d -> %d:%d bytes=%d comm=%q\n",
+				e.Evtype, e.Pid, e.Uid, e.Saddr, e.Sport, e.Daddr, e.Dport, e.Bytes, cstr(e.Comm[:]))
+		}
 	}
 }
 
