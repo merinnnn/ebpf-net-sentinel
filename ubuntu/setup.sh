@@ -13,6 +13,7 @@ sudo apt-get install -y \
   git build-essential clang llvm make pkg-config \
   linux-headers-$(uname -r) \
   linux-tools-common linux-tools-generic linux-tools-$(uname -r) \
+  bpftool \
   libbpf-dev libelf-dev zlib1g-dev \
   tcpreplay tcpdump \
   python3 python3-pip python3-venv
@@ -27,14 +28,18 @@ sudo rm -rf /usr/local/go
 sudo tar -C /usr/local -xzf go1.21.13.linux-amd64.tar.gz
 rm -f go1.21.13.linux-amd64.tar.gz
 
-# Ensure Go is on PATH now + next shells
+# Ensure Go is on PATH now + next shells (interactive + non-interactive)
 export PATH=/usr/local/go/bin:$PATH
+
 if ! grep -q "/usr/local/go/bin" ~/.bashrc 2>/dev/null; then
   echo 'export PATH=/usr/local/go/bin:$PATH' >> ~/.bashrc
 fi
 
+echo 'export PATH=/usr/local/go/bin:$PATH' | sudo tee /etc/profile.d/go-path.sh > /dev/null
+sudo chmod 644 /etc/profile.d/go-path.sh
+
 echo "[*] Go installed:"
-go version
+/usr/local/go/bin/go version
 
 # Install bpftool from source (latest stable)
 echo "[*] bpftool provided by linux-tools-$(uname -r)"
