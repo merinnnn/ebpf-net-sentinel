@@ -2,6 +2,12 @@
 data/
 .vscode/
 
+# eBPF generated artifacts
+ebpf_core/bpf/vmlinux.h
+ebpf_core/netmon.bpf.o
+ebpf_core/netmon
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
