@@ -52,6 +52,10 @@ func main() {
 	must(err)
 	defer kpSend.Close()
 
+	kpClnRbuf, err := link.Kprobe("tcp_cleanup_rbuf", coll.Programs["kp_tcp_cleanup_rbuf"], nil)
+	must(err)
+	defer kpClnRbuf.Close()
+
 	rd, err := ringbuf.NewReader(rbMap)
 	must(err)
 	defer rd.Close()
