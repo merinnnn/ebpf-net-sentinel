@@ -13,9 +13,19 @@ import (
 type Event struct {
 	TsNs     uint64
 	Pid      uint32
-	Oldstate uint32
-	Newstate uint32
+	Uid      uint32
+	Saddr    uint32
+	Daddr    uint32
+	Sport    uint16
+	Dport    uint16
+	Proto    uint8
+	Evtype   uint8
+	StateOld uint32
+	StateNew uint32
+	Bytes    uint64
+	Comm     [16]byte
 }
+
 
 func main() {
 	var objPath string
@@ -50,7 +60,9 @@ func main() {
 		}
 		var e Event
 		must(binary.Read(bytes.NewBuffer(rec.RawSample), binary.LittleEndian, &e))
-		fmt.Printf("pid=%d %d->%d ts=%d\n", e.Pid, e.Oldstate, e.Newstate, e.TsNs)
+		fmt.Printf("ev=%d pid=%d uid=%d %d:%d -> %d:%d bytes=%d comm=%q\n", 
+			e.Evtype, e.Pid, e.Uid, e.Saddr, e.Sport, e.Daddr, e.Dport, e.Bytes, cstr(e.Comm[:]))
+
 	}
 }
 
@@ -59,3 +71,12 @@ func must(err error) {
 		panic(err)
 	}
 }
+
+func cstr(b []byte) string {
+	n := bytes.IndexByte(b, 0)
+	if n == -1 {
+		n = len(b)
+	}
+	return string(b[:n])
+}
+
