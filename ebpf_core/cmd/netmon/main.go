@@ -48,6 +48,10 @@ func main() {
 	must(err)
 	defer tp.Close()
 
+	kpSend, err := link.Kprobe("tcp_sendmsg", coll.Programs["kp_tcp_sendmsg"], nil)
+	must(err)
+	defer kpSend.Close()
+
 	rd, err := ringbuf.NewReader(rbMap)
 	must(err)
 	defer rd.Close()

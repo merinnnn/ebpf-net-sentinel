@@ -72,3 +72,31 @@ int tp_inet_sock_set_state(struct trace_event_raw_inet_sock_set_state *ctx) {
   bpf_ringbuf_submit(e, 0);
   return 0;
 }
+
+SEC("kprobe/tcp_sendmsg")
+int kp_tcp_sendmsg(struct pt_regs *ctx) {
+  struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
+  size_t size = (size_t)PT_REGS_PARM3(ctx);
+
+  struct event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+  if (!e) return 0;
+
+  e->ts_ns = bpf_ktime_get_ns();
+  e->pid = (__u32)(bpf_get_current_pid_tgid() >> 32);
+  e->uid = (__u32)bpf_get_current_uid_gid();
+  bpf_get_current_comm(&e->comm, sizeof(e->comm));
+  e->proto = IPPROTO_TCP;
+
+  if (!fill_flow_from_sock(sk, e)) {
+    bpf_ringbuf_discard(e, 0);
+    return 0;
+  }
+
+  e->evtype = 2; // send
+  e->bytes = (__u64)size;
+  e->state_old = 0;
+  e->state_new = 0;
+
+  bpf_ringbuf_submit(e, 0);
+  return 0;
+}
