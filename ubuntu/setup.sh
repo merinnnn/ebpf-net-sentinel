@@ -13,7 +13,6 @@ sudo apt-get install -y \
   git build-essential clang llvm make pkg-config \
   linux-headers-$(uname -r) \
   linux-tools-common linux-tools-generic linux-tools-$(uname -r) \
-  bpftool \
   libbpf-dev libelf-dev zlib1g-dev \
   tcpreplay tcpdump \
   python3 python3-pip python3-venv
