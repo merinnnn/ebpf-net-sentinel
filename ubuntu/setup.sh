@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Update and install base packages
 sudo apt-get update
-sudo apt-get install -y software-properties-common ca-certificates curl gnupg
+sudo apt-get install -y software-properties-common ca-certificates curl gnupg wget
 sudo add-apt-repository -y universe
 sudo apt-get update
 
@@ -14,9 +14,27 @@ sudo apt-get install -y \
   linux-headers-$(uname -r) \
   linux-tools-common linux-tools-generic linux-tools-$(uname -r) \
   libbpf-dev libelf-dev zlib1g-dev \
-  golang \
   tcpreplay tcpdump \
   python3 python3-pip python3-venv
+
+# Install Go 1.21+ (1.13.8 on ubuntu 20.04)
+echo "[*] Installing Go 1.21.13..."
+sudo apt-get remove -y golang-go golang || true
+
+cd /tmp
+wget -q --show-progress -O go1.21.13.linux-amd64.tar.gz https://go.dev/dl/go1.21.13.linux-amd64.tar.gz
+sudo rm -rf /usr/local/go
+sudo tar -C /usr/local -xzf go1.21.13.linux-amd64.tar.gz
+rm -f go1.21.13.linux-amd64.tar.gz
+
+# Ensure Go is on PATH now + next shells
+export PATH=/usr/local/go/bin:$PATH
+if ! grep -q "/usr/local/go/bin" ~/.bashrc 2>/dev/null; then
+  echo 'export PATH=/usr/local/go/bin:$PATH' >> ~/.bashrc
+fi
+
+echo "[*] Go installed:"
+go version
 
 # Install bpftool from source (latest stable)
 echo "[*] bpftool provided by linux-tools-$(uname -r)"
@@ -53,7 +71,6 @@ sudo apt-get update
 # Lighter install with just core + client
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y zeek-core zeek-client
 
-# Verify Zeek installation
 # Verify Zeek installation (and fix PATH if needed)
 if [[ -x /opt/zeek/bin/zeek ]] && ! command -v zeek >/dev/null 2>&1; then
   sudo ln -sf /opt/zeek/bin/zeek /usr/local/bin/zeek
