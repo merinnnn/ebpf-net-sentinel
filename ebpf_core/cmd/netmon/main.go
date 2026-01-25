@@ -56,6 +56,10 @@ func main() {
 	must(err)
 	defer kpClnRbuf.Close()
 
+	kpRetransmit, err := link.Kprobe("tcp_retransmit_skb", coll.Programs["kp_tcp_retransmit_skb"], nil)
+	must(err)
+	defer kpRetransmit.Close()
+
 	rd, err := ringbuf.NewReader(rbMap)
 	must(err)
 	defer rd.Close()

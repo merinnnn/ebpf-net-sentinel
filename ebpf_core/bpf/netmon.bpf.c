@@ -129,3 +129,30 @@ int kp_tcp_cleanup_rbuf(struct pt_regs *ctx) {
   bpf_ringbuf_submit(e, 0);
   return 0;
 }
+
+SEC("kprobe/tcp_retransmit_skb")
+int kp_tcp_retransmit_skb(struct pt_regs *ctx) {
+  struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
+
+  struct event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+  if (!e) return 0;
+
+  e->ts_ns = bpf_ktime_get_ns();
+  e->pid = (__u32)(bpf_get_current_pid_tgid() >> 32);
+  e->uid = (__u32)bpf_get_current_uid_gid();
+  bpf_get_current_comm(&e->comm, sizeof(e->comm));
+  e->proto = IPPROTO_TCP;
+
+  if (!fill_flow_from_sock(sk, e)) {
+    bpf_ringbuf_discard(e, 0);
+    return 0;
+  }
+
+  e->evtype = 4; // retrans
+  e->bytes = 0;
+  e->state_old = 0;
+  e->state_new = 0;
+
+  bpf_ringbuf_submit(e, 0);
+  return 0;
+}
