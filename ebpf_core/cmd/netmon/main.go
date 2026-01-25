@@ -26,7 +26,6 @@ type Event struct {
 	Comm     [16]byte
 }
 
-
 func main() {
 	var objPath string
 	flag.StringVar(&objPath, "obj", "netmon.bpf.o", "compiled BPF object")
@@ -44,21 +43,23 @@ func main() {
 		panic("ringbuf map 'rb' not found")
 	}
 
-	tp, err := link.Tracepoint("sock", "inet_sock_set_state", coll.Programs["tp_inet_sock_set_state"], nil)
-	must(err)
-	defer tp.Close()
+	// Attach programs
+	var links []link.Link
+	defer func() {
+		for _, l := range links {
+			_ = l.Close()
+		}
+	}()
 
-	kpSend, err := link.Kprobe("tcp_sendmsg", coll.Programs["kp_tcp_sendmsg"], nil)
-	must(err)
-	defer kpSend.Close()
+	attach := func(l link.Link, err error) {
+		must(err)
+		links = append(links, l)
+	}
 
-	kpClnRbuf, err := link.Kprobe("tcp_cleanup_rbuf", coll.Programs["kp_tcp_cleanup_rbuf"], nil)
-	must(err)
-	defer kpClnRbuf.Close()
-
-	kpRetransmit, err := link.Kprobe("tcp_retransmit_skb", coll.Programs["kp_tcp_retransmit_skb"], nil)
-	must(err)
-	defer kpRetransmit.Close()
+	attach(link.Tracepoint("sock", "inet_sock_set_state", coll.Programs["tp_inet_sock_set_state"], nil))
+	attach(link.Kprobe("tcp_sendmsg", coll.Programs["kp_tcp_sendmsg"], nil))
+	attach(link.Kprobe("tcp_cleanup_rbuf", coll.Programs["kp_tcp_cleanup_rbuf"], nil))
+	attach(link.Kprobe("tcp_retransmit_skb", coll.Programs["kp_tcp_retransmit_skb"], nil))
 
 	rd, err := ringbuf.NewReader(rbMap)
 	must(err)
@@ -91,4 +92,3 @@ func cstr(b []byte) string {
 	}
 	return string(b[:n])
 }
-
