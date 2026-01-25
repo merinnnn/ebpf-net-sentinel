@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
@@ -53,7 +55,12 @@ type FlowAgg struct {
 
 func main() {
 	var objPath string
+	var outPath string
+	var flushSec int
+
 	flag.StringVar(&objPath, "obj", "netmon.bpf.o", "compiled BPF object")
+	flag.StringVar(&outPath, "out", "ebpf_agg.jsonl", "output JSONL (flow-level aggregates)")
+	flag.IntVar(&flushSec, "flush", 5, "flush interval seconds")
 	flag.Parse()
 
 	spec, err := ebpf.LoadCollectionSpec(objPath)
@@ -90,23 +97,68 @@ func main() {
 	must(err)
 	defer rd.Close()
 
+	// Output file
+	f, err := os.OpenFile(outPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	must(err)
+	defer f.Close()
+
 	// Aggregation store
 	var mu sync.Mutex
 	flows := map[FlowKey]*FlowAgg{}
+
+	flush := func() {
+		mu.Lock()
+		defer mu.Unlock()
+
+		now := time.Now().UnixNano()
+		for k, a := range flows {
+			row := map[string]any{
+				"flush_ts_ns":   now,
+				"saddr":         k.Saddr,
+				"daddr":         k.Daddr,
+				"sport":         k.Sport,
+				"dport":         k.Dport,
+				"proto":         k.Proto,
+				"first_ts_ns":   a.FirstTsNs,
+				"last_ts_ns":    a.LastTsNs,
+				"bytes_sent":    a.BytesSent,
+				"bytes_recv":    a.BytesRecv,
+				"retransmits":   a.Retransmits,
+				"state_changes": a.StateChanges,
+				"pid_mode":      a.PidMode,
+				"uid_mode":      a.UidMode,
+				"comm_mode":     a.CommMode,
+				"samples":       a.Samples,
+			}
+
+			b, _ := json.Marshal(row)
+			_, _ = f.Write(append(b, '\n'))
+			delete(flows, k)
+		}
+	}
+
+	// Flush ticker
+	ticker := time.NewTicker(time.Duration(flushSec) * time.Second)
+	defer ticker.Stop()
+
+	go func() {
+		for range ticker.C {
+			flush()
+		}
+	}()
 
 	// Graceful shutdown (Ctrl+C)
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
-	fmt.Println("[*] netmon running; generating events on TCP state changes (Ctrl+C to stop)")
+	fmt.Println("[*] eBPF collector running (Ctrl+C to stop)")
 	for {
 		select {
 		case <-stop:
-			fmt.Println("[*] stopping...")
-			mu.Lock()
-			fmt.Printf("[*] tracked flows in memory: %d\n", len(flows))
-			mu.Unlock()
+			fmt.Println("[*] stopping, final flush...")
+			flush()
 			return
+
 		default:
 			rec, err := rd.Read()
 			if err != nil {
