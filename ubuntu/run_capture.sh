@@ -12,6 +12,30 @@ EBPF_OUT="$OUTDIR/ebpf_agg.jsonl"
 
 mkdir -p "$OUTDIR" "$ZEEK_DIR"
 
+PCAP="$(realpath "$PCAP" 2>/dev/null || true)"
+if [[ -z "${PCAP}" || ! -f "${PCAP}" ]]; then
+  echo "[!] PCAP not found: ${1}"
+  echo "    Run: realpath <pcap> and pass that."
+  exit 1
+fi
+
+echo "[*] Inputs:"
+echo "  PCAP : $PCAP"
+echo "  IFACE: $IFACE"
+echo "  MBPS : $MBPS"
+
+NETMON_PID=""
+
+cleanup() {
+  echo "[*] Cleanup..."
+  if [[ -n "${NETMON_PID}" ]]; then
+    echo "[*] Stop eBPF collector (pid=${NETMON_PID})"
+    sudo kill -INT "${NETMON_PID}" >/dev/null 2>&1 || true
+    sleep 2
+  fi
+}
+trap cleanup EXIT INT TERM
+
 echo "[1/4] Zeek flow extraction"
 bash "$ROOT_DIR/ubuntu/zeek_extract.sh" "$PCAP" "$ZEEK_DIR"
 
@@ -21,16 +45,15 @@ make
 popd >/dev/null
 
 echo "[3/4] Start eBPF collector"
-sudo "$ROOT_DIR/ebpf_core/netmon" -obj "$ROOT_DIR/ebpf_core/netmon.bpf.o" -out "$EBPF_OUT" -flush 5 &
-EBPF_PID=$!
+NETMON_PID="$(sudo bash -c "
+  \"$ROOT_DIR/ebpf_core/netmon\" -obj \"$ROOT_DIR/ebpf_core/netmon.bpf.o\" -out \"$EBPF_OUT\" -flush 5 >/dev/null 2>&1 &
+  echo \$!
+")"
+echo "  netmon pid: $NETMON_PID"
 sleep 2
 
 echo "[4/4] Replay PCAP"
 bash "$ROOT_DIR/ubuntu/replay_pcap.sh" "$PCAP" "$IFACE" "$MBPS" || true
-
-echo "[*] Stop eBPF collector"
-sudo kill -INT "$EBPF_PID" || true
-sleep 2
 
 echo "[*] Outputs:"
 echo "  Zeek: $ZEEK_DIR/conn.csv"
