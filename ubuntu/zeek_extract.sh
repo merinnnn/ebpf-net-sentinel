@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PCAP="${1:Usage: zeek_extract.sh <pcap> <outdir>}"
-OUTDIR="${2:Usage: zeek_extract.sh <pcap> <outdir>}"
+PCAP="${1:?Usage: zeek_extract.sh <pcap> <outdir>}"
+OUTDIR="${2:?Usage: zeek_extract.sh <pcap> <outdir>}"
 
 mkdir -p "$OUTDIR"
 pushd "$OUTDIR" > /dev/null
