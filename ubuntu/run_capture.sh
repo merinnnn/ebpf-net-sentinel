@@ -13,7 +13,7 @@ EBPF_OUT="$OUTDIR/ebpf_agg.jsonl"
 mkdir -p "$OUTDIR" "$ZEEK_DIR"
 
 echo "[1/4] Zeek flow extraction"
-bash "$ROOT_DIR/ubuntu_pipeline/zeek_extract.sh" "$PCAP" "$ZEEK_DIR"
+bash "$ROOT_DIR/ubuntu/zeek_extract.sh" "$PCAP" "$ZEEK_DIR"
 
 echo "[2/4] Build eBPF collector"
 pushd "$ROOT_DIR/ebpf_core" >/dev/null
@@ -26,7 +26,7 @@ EBPF_PID=$!
 sleep 2
 
 echo "[4/4] Replay PCAP"
-bash "$ROOT_DIR/ubuntu_pipeline/replay_pcap.sh" "$PCAP" "$IFACE" "$MBPS" || true
+bash "$ROOT_DIR/ubuntu/replay_pcap.sh" "$PCAP" "$IFACE" "$MBPS" || true
 
 echo "[*] Stop eBPF collector"
 sudo kill -INT "$EBPF_PID" || true
