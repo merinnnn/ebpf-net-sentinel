@@ -132,5 +132,11 @@ def main():
     merged[out_cols].to_csv(args.out, index=False)
     print(f"[*] Wrote enriched flows: {args.out}")
 
+    total = len(merged)
+    matched = int((merged["ebpf_samples"] > 0).sum())
+    print(f"[*] Merge coverage: {matched}/{total} ({matched/total:.4f}) rows have ebpf_samples>0")
+    print("[*] match_dir counts:")
+    print(merged["match_dir"].value_counts(dropna=False).to_string())
+
 if __name__ == "__main__":
     main()
