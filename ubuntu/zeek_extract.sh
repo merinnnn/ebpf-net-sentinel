@@ -9,9 +9,10 @@ pushd "$OUTDIR" > /dev/null
 
 echo "[*] Extracting Zeek logs from pcap '$PCAP'"
 
+# Use JSON logs so we don't depend on zeek-cut
 sudo zeek -r "$PCAP" LogAscii::use_json=T > /dev/null
 
-echo "[*] Converting conn.log to conn.csv"
+echo "[*] Converting conn.log to conn.csv (with header)"
 python3 - <<'PY'
 import json
 import csv
@@ -30,6 +31,7 @@ if not in_path.exists():
 
 with in_path.open("r", encoding="utf-8", errors="ignore") as f, out_path.open("w", newline="", encoding="utf-8") as out:
     w = csv.writer(out)
+    w.writerow(["ts","orig_h","resp_h","orig_p","resp_p","proto","duration","orig_bytes","resp_bytes","orig_pkts","resp_pkts","conn_state"])
     for line in f:
         line = line.strip()
         if not line:
@@ -41,7 +43,8 @@ with in_path.open("r", encoding="utf-8", errors="ignore") as f, out_path.open("w
         row = []
         for k in fields:
             row.append(obj.get(k, ""))
-        w.writerow(row)
+        # map to friendly header order
+        w.writerow([row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9], row[10], row[11]])
 
 print(f"[*] Wrote: {out_path}")
 PY
