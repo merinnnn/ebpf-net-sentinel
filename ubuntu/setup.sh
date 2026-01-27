@@ -18,16 +18,20 @@ sudo apt-get install -y \
   python3 python3-pip python3-venv
 
 # Install Go 1.21+ (1.13.8 on ubuntu 20.04)
-echo "[*] Installing Go 1.21.13..."
+GO_VER="1.21.13"
+echo "[*] Installing Go ${GO_VER}..."
 sudo apt-get remove -y golang-go golang || true
 
 cd /tmp
-wget -q --show-progress -O go1.21.13.linux-amd64.tar.gz https://go.dev/dl/go1.21.13.linux-amd64.tar.gz
+wget -q --show-progress -O "go${GO_VER}.linux-amd64.tar.gz" "https://go.dev/dl/go${GO_VER}.linux-amd64.tar.gz"
 sudo rm -rf /usr/local/go
-sudo tar -C /usr/local -xzf go1.21.13.linux-amd64.tar.gz
-rm -f go1.21.13.linux-amd64.tar.gz
+sudo tar -C /usr/local -xzf "go${GO_VER}.linux-amd64.tar.gz"
+rm -f "go${GO_VER}.linux-amd64.tar.gz"
 
-# Ensure Go is on PATH now + next shells (interactive + non-interactive)
+# Make Go available for:
+# - current shell
+# - future shells
+# - non-interactive shells (make, sudo envs, scripts)
 export PATH=/usr/local/go/bin:$PATH
 
 if ! grep -q "/usr/local/go/bin" ~/.bashrc 2>/dev/null; then
@@ -37,11 +41,15 @@ fi
 echo 'export PATH=/usr/local/go/bin:$PATH' | sudo tee /etc/profile.d/go-path.sh > /dev/null
 sudo chmod 644 /etc/profile.d/go-path.sh
 
-echo "[*] Go installed:"
-/usr/local/go/bin/go version
+# Symlink go into /usr/local/bin (already in PATH)
+sudo ln -sf /usr/local/go/bin/go /usr/local/bin/go
+sudo ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
 
-# Install bpftool from source (latest stable)
-echo "[*] bpftool provided by linux-tools-$(uname -r)"
+echo "[*] Go installed:"
+go version || /usr/local/go/bin/go version
+
+# bpftool provided by linux-tools-$(uname -r)
+echo "[*] Installing bpftool (linux-tools-$(uname -r))..."
 sudo apt-get install -y bpfcc-tools || true
 
 # Sanity check installations
@@ -51,6 +59,7 @@ bpftool version
 clang --version
 tcpdump --version
 tcpreplay --version
+go version
 
 echo "[*] Base Ubuntu eBPF tooling setup complete."
 
@@ -71,16 +80,22 @@ curl -fsSL "https://download.opensuse.org/repositories/security:/zeek/xUbuntu_20
   | sudo tee /etc/apt/trusted.gpg.d/zeek.gpg > /dev/null
 
 sudo apt-get update
-
-# Lighter install with just core + client
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y zeek-core zeek-client
 
-# Verify Zeek installation (and fix PATH if needed)
+# Ensure zeek + zeek-cut are on PATH
 if [[ -x /opt/zeek/bin/zeek ]] && ! command -v zeek >/dev/null 2>&1; then
   sudo ln -sf /opt/zeek/bin/zeek /usr/local/bin/zeek
 fi
+if [[ -x /opt/zeek/bin/zeek-cut ]] && ! command -v zeek-cut >/dev/null 2>&1; then
+  sudo ln -sf /opt/zeek/bin/zeek-cut /usr/local/bin/zeek-cut
+fi
 
 zeek --version
+if command -v zeek-cut >/dev/null 2>&1; then
+  echo "[*] zeek-cut available."
+else
+  echo "[!] zeek-cut not found (OK if you convert JSON logs via python)."
+fi
 
 echo "[*] Zeek installation complete."
 
