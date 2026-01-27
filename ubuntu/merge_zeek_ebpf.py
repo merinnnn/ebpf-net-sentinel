@@ -45,6 +45,14 @@ def load_ebpf_agg(jsonl: str) -> pd.DataFrame:
     df["last_ts_s"] = df["last_ts_ns"].astype(float) / 1e9
     return df
 
+def add_ebpf_cols(df: pd.DataFrame) -> pd.DataFrame:
+    df["ebpf_bytes_sent"] = df["bytes_sent"].fillna(0).astype(float)
+    df["ebpf_bytes_recv"] = df["bytes_recv"].fillna(0).astype(float)
+    df["ebpf_retransmits"] = df["retransmits"].fillna(0).astype(float)
+    df["ebpf_state_changes"] = df["state_changes"].fillna(0).astype(float)
+    df["ebpf_samples"] = df["samples"].fillna(0).astype(float)
+    return df
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--zeek_conn", required=True)
@@ -69,12 +77,28 @@ def main():
         print(f"[!] No eBPF data. Wrote Zeek-only: {args.out}")
         return
 
-    merged = z.merge(
+    z = z.reset_index(drop=True)
+    z["zeek_row"] = z.index.astype(int)
+
+    # Direction A: Zeek orig->resp matches eBPF saddr->daddr
+    m1 = z.merge(
         e,
         left_on=["orig_ip_u32","resp_ip_u32","orig_p","resp_p","proto_num"],
         right_on=["saddr_u32","daddr_u32","sport","dport","proto"],
         how="left"
     )
+    m1["match_dir"] = "orig_resp"
+
+    # Direction B: Zeek orig->resp matches eBPF daddr->saddr (swapped)
+    m2 = z.merge(
+        e,
+        left_on=["orig_ip_u32","resp_ip_u32","orig_p","resp_p","proto_num"],
+        right_on=["daddr_u32","saddr_u32","dport","sport","proto"],
+        how="left"
+    )
+    m2["match_dir"] = "resp_orig"
+
+    merged = pd.concat([m1, m2], ignore_index=True)
 
     has = merged["first_ts_s"].notna()
     ok = (
@@ -84,17 +108,26 @@ def main():
     )
     merged = merged[ok].copy()
 
-    merged["ebpf_bytes_sent"] = merged["bytes_sent"].fillna(0).astype(float)
-    merged["ebpf_bytes_recv"] = merged["bytes_recv"].fillna(0).astype(float)
-    merged["ebpf_retransmits"] = merged["retransmits"].fillna(0).astype(float)
-    merged["ebpf_state_changes"] = merged["state_changes"].fillna(0).astype(float)
-    merged["ebpf_samples"] = merged["samples"].fillna(0).astype(float)
+    # If multiple eBPF rows match one Zeek row, keep the one with best time overlap
+    # overlap = min(end_ts, last_ts_s) - max(start_ts, first_ts_s)
+    merged["overlap"] = 0.0
+    has = merged["first_ts_s"].notna()
+    merged.loc[has, "overlap"] = (
+        (merged.loc[has, ["end_ts","last_ts_s"]].min(axis=1)) -
+        (merged.loc[has, ["start_ts","first_ts_s"]].max(axis=1))
+    )
+
+    merged = merged.sort_values(["zeek_row","overlap"], ascending=[True, False])
+    merged = merged.drop_duplicates(subset=["zeek_row"], keep="first").copy()
+
+    merged = add_ebpf_cols(merged)
 
     out_cols = [
         "ts","duration","orig_h","resp_h","orig_p","resp_p","proto","conn_state",
         "orig_bytes","resp_bytes","orig_pkts","resp_pkts",
         "start_ts","end_ts",
-        "ebpf_bytes_sent","ebpf_bytes_recv","ebpf_retransmits","ebpf_state_changes","ebpf_samples"
+        "ebpf_bytes_sent","ebpf_bytes_recv","ebpf_retransmits","ebpf_state_changes","ebpf_samples",
+        "match_dir"
     ]
     merged[out_cols].to_csv(args.out, index=False)
     print(f"[*] Wrote enriched flows: {args.out}")
