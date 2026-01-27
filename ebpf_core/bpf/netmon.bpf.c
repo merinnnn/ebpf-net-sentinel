@@ -9,18 +9,24 @@
 #define AF_INET 2
 #endif
 
+#ifndef IPPROTO_TCP
+#define IPPROTO_TCP 6
+#endif
+
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
 struct event {
-  __u64 ts_ns;
-  __u32 pid;
+  __u64 ts_mono_ns;
+  __u64 sock_cookie;
+  __u32 pid;       // TGID (process id)
   __u32 uid;
-  __u32 saddr;     // __be32 (network order)
-  __u32 daddr;     // __be32
+  __u32 saddr;     // IPv4 as u32 after ntohl (matches ipaddress.IPv4Address int)
+  __u32 daddr;
   __u16 sport;     // host order
   __u16 dport;     // host order
   __u8  proto;     // 6 TCP
-  __u8  evtype;    // 1=state
+  __u8  evtype;    // 1=state,2=send,3=recv,4=retrans
+  __u16 _pad;      // explicit padding to align next u32
   __u32 state_old;
   __u32 state_new;
   __u64 bytes;
@@ -36,12 +42,26 @@ static __always_inline int fill_flow_from_sock(struct sock *sk, struct event *e)
   __u16 family = BPF_CORE_READ(sk, __sk_common.skc_family);
   if (family != AF_INET) return 0;
 
-  e->saddr = BPF_CORE_READ(sk, __sk_common.skc_rcv_saddr);
-  e->daddr = BPF_CORE_READ(sk, __sk_common.skc_daddr);
+  // skc_rcv_saddr / skc_daddr are __be32; make them stable u32
+  __u32 s = BPF_CORE_READ(sk, __sk_common.skc_rcv_saddr);
+  __u32 d = BPF_CORE_READ(sk, __sk_common.skc_daddr);
+
+  e->saddr = bpf_ntohl(s);
+  e->daddr = bpf_ntohl(d);
 
   e->sport = BPF_CORE_READ(sk, __sk_common.skc_num);
   e->dport = bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
+
+  e->sock_cookie = bpf_get_socket_cookie(sk);
   return 1;
+}
+
+static __always_inline void fill_common(struct event *e) {
+  e->ts_mono_ns = bpf_ktime_get_ns();
+  e->pid = (__u32)(bpf_get_current_pid_tgid() >> 32);
+  e->uid = (__u32)bpf_get_current_uid_gid();
+  bpf_get_current_comm(&e->comm, sizeof(e->comm));
+  e->proto = IPPROTO_TCP;
 }
 
 SEC("tracepoint/sock/inet_sock_set_state")
@@ -53,11 +73,7 @@ int tp_inet_sock_set_state(struct trace_event_raw_inet_sock_set_state *ctx) {
   struct event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
   if (!e) return 0;
 
-  e->ts_ns = bpf_ktime_get_ns();
-  e->pid = (__u32)(bpf_get_current_pid_tgid() >> 32);
-  e->uid = (__u32)bpf_get_current_uid_gid();
-  bpf_get_current_comm(&e->comm, sizeof(e->comm));
-  e->proto = IPPROTO_TCP;
+  fill_common(e);
 
   if (!fill_flow_from_sock(sk, e)) {
     bpf_ringbuf_discard(e, 0);
@@ -81,18 +97,14 @@ int kp_tcp_sendmsg(struct pt_regs *ctx) {
   struct event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
   if (!e) return 0;
 
-  e->ts_ns = bpf_ktime_get_ns();
-  e->pid = (__u32)(bpf_get_current_pid_tgid() >> 32);
-  e->uid = (__u32)bpf_get_current_uid_gid();
-  bpf_get_current_comm(&e->comm, sizeof(e->comm));
-  e->proto = IPPROTO_TCP;
+  fill_common(e);
 
   if (!fill_flow_from_sock(sk, e)) {
     bpf_ringbuf_discard(e, 0);
     return 0;
   }
 
-  e->evtype = 2; // send
+  e->evtype = 2;
   e->bytes = (__u64)size;
   e->state_old = 0;
   e->state_new = 0;
@@ -110,18 +122,14 @@ int kp_tcp_cleanup_rbuf(struct pt_regs *ctx) {
   struct event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
   if (!e) return 0;
 
-  e->ts_ns = bpf_ktime_get_ns();
-  e->pid = (__u32)(bpf_get_current_pid_tgid() >> 32);
-  e->uid = (__u32)bpf_get_current_uid_gid();
-  bpf_get_current_comm(&e->comm, sizeof(e->comm));
-  e->proto = IPPROTO_TCP;
+  fill_common(e);
 
   if (!fill_flow_from_sock(sk, e)) {
     bpf_ringbuf_discard(e, 0);
     return 0;
   }
 
-  e->evtype = 3; // recv
+  e->evtype = 3;
   e->bytes = (__u64)copied;
   e->state_old = 0;
   e->state_new = 0;
@@ -137,18 +145,14 @@ int kp_tcp_retransmit_skb(struct pt_regs *ctx) {
   struct event *e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
   if (!e) return 0;
 
-  e->ts_ns = bpf_ktime_get_ns();
-  e->pid = (__u32)(bpf_get_current_pid_tgid() >> 32);
-  e->uid = (__u32)bpf_get_current_uid_gid();
-  bpf_get_current_comm(&e->comm, sizeof(e->comm));
-  e->proto = IPPROTO_TCP;
+  fill_common(e);
 
   if (!fill_flow_from_sock(sk, e)) {
     bpf_ringbuf_discard(e, 0);
     return 0;
   }
 
-  e->evtype = 4; // retrans
+  e->evtype = 4;
   e->bytes = 0;
   e->state_old = 0;
   e->state_new = 0;
