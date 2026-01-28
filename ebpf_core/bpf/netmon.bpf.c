@@ -192,59 +192,55 @@ int tp_inet_sock_set_state(struct trace_event_raw_inet_sock_set_state *ctx) {
 }
 
 SEC("kprobe/tcp_sendmsg")
-int BPF_KPROBE(kp_tcp_sendmsg, struct sock *sk, struct msghdr *msg, size_t size) {
+int kp_tcp_sendmsg(struct pt_regs *ctx) {
+  struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
+  size_t size = (size_t)PT_REGS_PARM3(ctx); // tcp_sendmsg(sk, msg, size)
   if (!sk) return 0;
 
-  struct event e = {};
   struct flow_key k = {};
-
-  e.ts_ns = bpf_ktime_get_ns();
+  struct event e = {};
   if (!fill_flow_from_sock(sk, &e, &k)) return 0;
   fill_proc_from_cookie(sk, &e, 1);
 
   e.evtype = 2;
   e.bytes = (__u64)size;
 
-  update_flow(&k, &e);
-  emit_event(&e);
+  submit_event_and_update(&e, &k);
   return 0;
 }
 
 SEC("kprobe/tcp_cleanup_rbuf")
-int BPF_KPROBE(kp_tcp_cleanup_rbuf, struct sock *sk, int copied) {
+int kp_tcp_cleanup_rbuf(struct pt_regs *ctx) {
+  struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
+  int copied = (int)PT_REGS_PARM2(ctx); // tcp_cleanup_rbuf(sk, copied)
   if (!sk) return 0;
   if (copied <= 0) return 0;
 
-  struct event e = {};
   struct flow_key k = {};
-
-  e.ts_ns = bpf_ktime_get_ns();
+  struct event e = {};
   if (!fill_flow_from_sock(sk, &e, &k)) return 0;
   fill_proc_from_cookie(sk, &e, 0);
 
   e.evtype = 3;
   e.bytes = (__u64)copied;
 
-  update_flow(&k, &e);
-  emit_event(&e);
+  submit_event_and_update(&e, &k);
   return 0;
 }
 
 SEC("kprobe/tcp_retransmit_skb")
-int BPF_KPROBE(kp_tcp_retransmit_skb, struct sock *sk) {
+int kp_tcp_retransmit_skb(struct pt_regs *ctx) {
+  struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx); // tcp_retransmit_skb(sk, skb, ...)
   if (!sk) return 0;
 
-  struct event e = {};
   struct flow_key k = {};
-
-  e.ts_ns = bpf_ktime_get_ns();
+  struct event e = {};
   if (!fill_flow_from_sock(sk, &e, &k)) return 0;
   fill_proc_from_cookie(sk, &e, 0);
 
   e.evtype = 4;
-  e.retransmits = 1;
+  e.bytes = 0;
 
-  update_flow(&k, &e);
-  emit_event(&e);
+  submit_event_and_update(&e, &k);
   return 0;
 }
