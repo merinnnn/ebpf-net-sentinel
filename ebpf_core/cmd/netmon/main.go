@@ -269,7 +269,7 @@ func main() {
 			}
 
 			want := binary.Size(Event{})
-			if len(record.RawSample) < want {
+			if len(rec.RawSample) < want {
 				// Skip malformed / short samples instead of panicking
 				continue
 			}
