@@ -17,7 +17,6 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
 struct event {
   __u64 ts_ns;
-  __u64 sock_cookie;
 
   __u32 pid;
   __u32 uid;
@@ -59,15 +58,9 @@ struct flow_val {
   char  comm_last[16];
 };
 
-struct proc_info {
-  __u32 pid;
-  __u32 uid;
-  char  comm[16];
-};
-
 struct {
   __uint(type, BPF_MAP_TYPE_RINGBUF);
-  __uint(max_entries, 1 << 24);
+  __uint(max_entries, 1 << 24); // 16MB
 } rb SEC(".maps");
 
 struct {
@@ -77,12 +70,11 @@ struct {
   __type(value, struct flow_val);
 } flows SEC(".maps");
 
-struct {
-  __uint(type, BPF_MAP_TYPE_LRU_HASH);
-  __uint(max_entries, 262144);
-  __type(key, __u64);
-  __type(value, struct proc_info);
-} proc_by_cookie SEC(".maps");
+static __always_inline void fill_proc_current(struct event *e) {
+  e->pid = (__u32)(bpf_get_current_pid_tgid() >> 32);
+  e->uid = (__u32)bpf_get_current_uid_gid();
+  bpf_get_current_comm(&e->comm, sizeof(e->comm));
+}
 
 static __always_inline int fill_flow_from_sock(struct sock *sk, struct event *e, struct flow_key *k) {
   __u16 family = BPF_CORE_READ(sk, __sk_common.skc_family);
@@ -90,8 +82,8 @@ static __always_inline int fill_flow_from_sock(struct sock *sk, struct event *e,
 
   __u32 saddr = BPF_CORE_READ(sk, __sk_common.skc_rcv_saddr);
   __u32 daddr = BPF_CORE_READ(sk, __sk_common.skc_daddr);
-  __u16 sport = BPF_CORE_READ(sk, __sk_common.skc_num);          // host order
-  __u16 dport = BPF_CORE_READ(sk, __sk_common.skc_dport);        // network order
+  __u16 sport = BPF_CORE_READ(sk, __sk_common.skc_num);   // host order
+  __u16 dport = BPF_CORE_READ(sk, __sk_common.skc_dport); // network order
 
   e->saddr = saddr;
   e->daddr = daddr;
@@ -108,30 +100,6 @@ static __always_inline int fill_flow_from_sock(struct sock *sk, struct event *e,
   return 1;
 }
 
-static __always_inline void fill_proc_from_cookie(struct sock *sk, struct event *e, int update) {
-  __u64 cookie = bpf_get_socket_cookie(sk);
-  e->sock_cookie = cookie;
-
-  struct proc_info *pi = bpf_map_lookup_elem(&proc_by_cookie, &cookie);
-  if (pi) {
-    e->pid = pi->pid;
-    e->uid = pi->uid;
-    __builtin_memcpy(e->comm, pi->comm, sizeof(e->comm));
-  } else {
-    e->pid = (__u32)(bpf_get_current_pid_tgid() >> 32);
-    e->uid = (__u32)bpf_get_current_uid_gid();
-    bpf_get_current_comm(&e->comm, sizeof(e->comm));
-  }
-
-  if (update) {
-    struct proc_info n = {};
-    n.pid = e->pid;
-    n.uid = e->uid;
-    __builtin_memcpy(n.comm, e->comm, sizeof(n.comm));
-    bpf_map_update_elem(&proc_by_cookie, &cookie, &n, BPF_ANY);
-  }
-}
-
 static __always_inline void update_flow(struct flow_key *k, struct event *e) {
   struct flow_val *v = bpf_map_lookup_elem(&flows, k);
   if (!v) {
@@ -146,7 +114,9 @@ static __always_inline void update_flow(struct flow_key *k, struct event *e) {
     if (!v) return;
   }
 
-  v->last_ts_ns = e->ts_ns;
+  if (e->ts_ns < v->first_ts_ns) v->first_ts_ns = e->ts_ns;
+  if (e->ts_ns > v->last_ts_ns)  v->last_ts_ns  = e->ts_ns;
+
   v->samples += 1;
 
   v->pid_last = e->pid;
@@ -165,14 +135,16 @@ static __always_inline void update_flow(struct flow_key *k, struct event *e) {
 }
 
 static __always_inline void emit_event(struct event *e) {
-  struct event *out = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+  struct event *out = bpf_ringbuf_reserve(&rb, sizeof(*out), 0);
   if (!out) return;
-  __builtin_memcpy(out, e, sizeof(*e));
+  __builtin_memcpy(out, e, sizeof(*out));
   bpf_ringbuf_submit(out, 0);
 }
 
 SEC("tracepoint/sock/inet_sock_set_state")
 int tp_inet_sock_set_state(struct trace_event_raw_inet_sock_set_state *ctx) {
+  if (ctx->protocol != IPPROTO_TCP) return 0;
+
   struct sock *sk = (struct sock *)ctx->skaddr;
   if (!sk) return 0;
 
@@ -181,11 +153,13 @@ int tp_inet_sock_set_state(struct trace_event_raw_inet_sock_set_state *ctx) {
 
   e.ts_ns = bpf_ktime_get_ns();
   if (!fill_flow_from_sock(sk, &e, &k)) return 0;
-  fill_proc_from_cookie(sk, &e, 0);
+  fill_proc_current(&e);
 
   e.evtype = 1;
   e.state_old = ctx->oldstate;
   e.state_new = ctx->newstate;
+  e.bytes = 0;
+  e.retransmits = 0;
 
   update_flow(&k, &e);
   emit_event(&e);
@@ -200,11 +174,17 @@ int kp_tcp_sendmsg(struct pt_regs *ctx) {
 
   struct flow_key k = {};
   struct event e = {};
+
+  e.ts_ns = bpf_ktime_get_ns();
+
   if (!fill_flow_from_sock(sk, &e, &k)) return 0;
-  fill_proc_from_cookie(sk, &e, 1);
+  fill_proc_current(&e);
 
   e.evtype = 2;
   e.bytes = (__u64)size;
+  e.retransmits = 0;
+  e.state_old = 0;
+  e.state_new = 0;
 
   update_flow(&k, &e);
   emit_event(&e);
@@ -220,11 +200,17 @@ int kp_tcp_cleanup_rbuf(struct pt_regs *ctx) {
 
   struct flow_key k = {};
   struct event e = {};
+
+  e.ts_ns = bpf_ktime_get_ns();
+
   if (!fill_flow_from_sock(sk, &e, &k)) return 0;
-  fill_proc_from_cookie(sk, &e, 0);
+  fill_proc_current(&e);
 
   e.evtype = 3;
   e.bytes = (__u64)copied;
+  e.retransmits = 0;
+  e.state_old = 0;
+  e.state_new = 0;
 
   update_flow(&k, &e);
   emit_event(&e);
@@ -233,16 +219,22 @@ int kp_tcp_cleanup_rbuf(struct pt_regs *ctx) {
 
 SEC("kprobe/tcp_retransmit_skb")
 int kp_tcp_retransmit_skb(struct pt_regs *ctx) {
-  struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx); // tcp_retransmit_skb(sk, skb, ...)
+  struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
   if (!sk) return 0;
 
   struct flow_key k = {};
   struct event e = {};
+
+  e.ts_ns = bpf_ktime_get_ns();
+
   if (!fill_flow_from_sock(sk, &e, &k)) return 0;
-  fill_proc_from_cookie(sk, &e, 0);
+  fill_proc_current(&e);
 
   e.evtype = 4;
   e.bytes = 0;
+  e.retransmits = 1;
+  e.state_old = 0;
+  e.state_new = 0;
 
   update_flow(&k, &e);
   emit_event(&e);
