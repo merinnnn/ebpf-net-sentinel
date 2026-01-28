@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-import argparse, os
+import argparse
+import os
 from datetime import datetime, timezone, timedelta
 import pandas as pd
 
@@ -27,20 +28,25 @@ def main():
     ap.add_argument("--scenario", required=True, help=f"One of: {list(WINDOWS.keys())}")
     ap.add_argument("--tz_offset_hours", type=int, default=0,
                     help="If labeling rate looks wrong, adjust (try -5..+5).")
-    ap.add_argument("--time_col", default="ts", help="Zeek ts column (epoch seconds)")
+    ap.add_argument("--time_col", default="ts", help="Time column (epoch seconds). Default: Zeek ts")
     args = ap.parse_args()
 
     if args.scenario not in WINDOWS:
         raise ValueError(f"Unknown scenario {args.scenario}. Options: {list(WINDOWS.keys())}")
 
-    os.makedirs(os.path.dirname(args.out_csv), exist_ok=True)
+    out_dir = os.path.dirname(args.out_csv)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
 
     df = pd.read_csv(args.in_csv)
-    ts = pd.to_numeric(df[args.time_col], errors="coerce")
+    if args.time_col not in df.columns:
+        raise ValueError(f"Missing time column '{args.time_col}' in {args.in_csv}")
+
+    ts = pd.to_numeric(df[args.time_col], errors="coerce").fillna(0.0)
 
     date_str, start_str, end_str, attack_name = WINDOWS[args.scenario]
     start_ep = to_epoch(date_str, start_str, args.tz_offset_hours)
-    end_ep   = to_epoch(date_str, end_str, args.tz_offset_hours)
+    end_ep = to_epoch(date_str, end_str, args.tz_offset_hours)
 
     df["is_attack"] = ((ts >= start_ep) & (ts <= end_ep)).astype(int)
     df["Label"] = df["is_attack"].map({0: "BENIGN", 1: attack_name})
@@ -51,9 +57,9 @@ def main():
     attacks = int(df["is_attack"].sum())
     print(f"Wrote: {args.out_csv}")
     print(f"Scenario: {args.scenario} => {attack_name}")
-    print(f"Window: {date_str} {start_str} → {end_str} (tz_offset_hours={args.tz_offset_hours})")
+    print(f"Window: {date_str} {start_str} -> {end_str} (tz_offset_hours={args.tz_offset_hours})")
     print(f"Attack rows: {attacks}/{total} ({attacks/total:.4f})")
-    print("Zeek ts range:", float(ts.min()), "→", float(ts.max()))
+    print("ts range:", float(ts.min()), "->", float(ts.max()))
 
 if __name__ == "__main__":
     main()
