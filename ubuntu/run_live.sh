@@ -1,59 +1,81 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IFACE="${1:?Usage: run_live.sh <iface>}"
+IFACE="${1:?Usage: run_live.sh <iface|auto> [duration_sec]}"
 DUR_SEC="${2:-60}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUTDIR="$ROOT_DIR/data/live_run"
+STAMP="$(date +%Y%m%d_%H%M%S)"
+OUTDIR="$ROOT_DIR/data/live_run/$STAMP"
 ZEEK_DIR="$OUTDIR/zeek"
 EBPF_OUT="$OUTDIR/ebpf_agg.jsonl"
+EBPF_EVENTS="$OUTDIR/ebpf_events.jsonl"
 
 mkdir -p "$OUTDIR" "$ZEEK_DIR"
 
-if ! ip link show "$IFACE" >/dev/null 2>&1; then
-  echo "[!] Interface not found: $IFACE"
-  ip -o link show | awk -F': ' '{print "  - "$2}'
+pick_default_iface() {
+  ip route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}'
+}
+
+iface_exists() {
+  ip link show "$1" >/dev/null 2>&1
+}
+
+if [[ "$IFACE" == "auto" || -z "$IFACE" ]]; then
+  IFACE="$(pick_default_iface || true)"
+fi
+
+if [[ -z "${IFACE:-}" || ! "$(iface_exists "$IFACE" && echo ok)" ]]; then
+  echo "[!] Invalid interface: '${IFACE:-}'" >&2
+  echo "[*] Available interfaces:" >&2
+  ip -o link show | awk -F': ' '{print "  - " $2}' >&2
   exit 1
 fi
 
-NETMON_PID=""
-ZEEK_PID=""
-
 cleanup() {
   echo "[*] Cleanup..."
-  if [[ -n "${ZEEK_PID}" ]]; then
-    sudo kill -INT "${ZEEK_PID}" >/dev/null 2>&1 || true
+  if [[ -n "${EBPF_PID:-}" ]]; then
+    echo "[*] Stop eBPF collector (pid=$EBPF_PID)"
+    sudo kill -INT "$EBPF_PID" >/dev/null 2>&1 || true
+    wait "$EBPF_PID" >/dev/null 2>&1 || true
   fi
-  if [[ -n "${NETMON_PID}" ]]; then
-    sudo kill -INT "${NETMON_PID}" >/dev/null 2>&1 || true
+  if [[ -n "${ZEEK_PID:-}" ]]; then
+    echo "[*] Stop Zeek (pid=$ZEEK_PID)"
+    sudo kill -INT "$ZEEK_PID" >/dev/null 2>&1 || true
+    wait "$ZEEK_PID" >/dev/null 2>&1 || true
+  fi
+
+  if [[ -f "$ZEEK_DIR/conn.log" ]]; then
+    echo "[*] Converting Zeek conn.log to conn.csv"
+    python3 "$ROOT_DIR/ubuntu/zeek_conn_to_csv.py" --in "$ZEEK_DIR/conn.log" --out "$ZEEK_DIR/conn.csv" || true
   fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
 
-echo "[1/3] Build eBPF collector"
-pushd "$ROOT_DIR/ebpf_core" >/dev/null
-make
-popd >/dev/null
+echo "[*] Live capture:"
+echo "  IFACE: $IFACE"
+echo "  DUR  : $DUR_SEC sec"
+echo "  OUT  : $OUTDIR"
 
-echo "[2/3] Start Zeek live on iface=$IFACE (duration=${DUR_SEC}s)"
+echo "[1/2] Start Zeek on interface"
 pushd "$ZEEK_DIR" >/dev/null
-sudo zeek -i "$IFACE" LogAscii::use_json=T >/dev/null 2>&1 &
-ZEEK_PID="$!"
+sudo zeek -i "$IFACE" LogAscii::use_json=T > /dev/null &
+ZEEK_PID=$!
 popd >/dev/null
 echo "  zeek pid: $ZEEK_PID"
+sleep 1
 
-echo "[3/3] Start eBPF collector"
-NETMON_PID="$(sudo bash -c "
-  \"$ROOT_DIR/ebpf_core/netmon\" -obj \"$ROOT_DIR/ebpf_core/netmon.bpf.o\" -out \"$EBPF_OUT\" -flush 5 >/dev/null 2>&1 &
-  echo \$!
-")"
-echo "  netmon pid: $NETMON_PID"
+echo "[2/2] Start eBPF collector"
+pushd "$ROOT_DIR/ebpf_core" >/dev/null
+make
+sudo ./netmon -obj ./netmon.bpf.o -out "$EBPF_OUT" -events "$EBPF_EVENTS" -flush 5 -mode both &
+EBPF_PID=$!
+popd >/dev/null
+echo "  netmon pid: $EBPF_PID"
 
-echo "[*] Capturing for ${DUR_SEC}s..."
 sleep "$DUR_SEC"
 
-echo "[*] Done. You can now convert Zeek conn.log -> conn.csv by running:"
-echo "    bash ubuntu/zeek_extract.sh <pcap> <outdir>   (pcap mode)"
-echo "Live mode writes conn.log in: $ZEEK_DIR"
-echo "eBPF JSONL written in: $EBPF_OUT"
+echo "[*] Outputs:"
+echo "  Zeek: $ZEEK_DIR/conn.csv"
+echo "  eBPF: $EBPF_OUT"
+echo "  Raw:  $EBPF_EVENTS"
