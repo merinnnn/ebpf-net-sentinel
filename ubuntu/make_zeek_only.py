@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-import argparse, os
+import argparse
+import os
 import pandas as pd
 
 def main():
@@ -8,7 +9,10 @@ def main():
     ap.add_argument("--out_csv", required=True)
     args = ap.parse_args()
 
-    os.makedirs(os.path.dirname(args.out_csv), exist_ok=True)
+    out_dir = os.path.dirname(args.out_csv)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
     df = pd.read_csv(args.in_csv)
 
     ebpf_cols = [c for c in df.columns if c.startswith("ebpf_")]
