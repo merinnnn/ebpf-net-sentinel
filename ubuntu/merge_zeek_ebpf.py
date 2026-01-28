@@ -2,26 +2,29 @@
 import argparse, json, os, ipaddress
 import pandas as pd
 
-ZEEK_COLS = [
-    "ts","orig_h","resp_h","orig_p","resp_p","proto","duration",
-    "orig_bytes","resp_bytes","orig_pkts","resp_pkts","conn_state"
-]
+# Zeek can emit IPv6 in real networks; our eBPF collector is IPv4-only for now.
+# We drop non-IPv4 rows during merge.
 
-def ip_to_u32(ip: str) -> int:
-    return int(ipaddress.IPv4Address(ip))
+def ip_to_u32_maybe(ip: str):
+    ip = str(ip).strip()
+    if ":" in ip:
+        return pd.NA
+    try:
+        return int(ipaddress.IPv4Address(ip))
+    except Exception:
+        return pd.NA
 
 def u32be_to_u32(u: int) -> int:
-    return int(ipaddress.IPv4Address(int(u).to_bytes(4, "big")))
+    return int(ipaddress.IPv4Address(u.to_bytes(4, "big")))
 
-def read_zeek_conn(conn_csv: str) -> pd.DataFrame:
-    df0 = pd.read_csv(conn_csv)
-    if set(ZEEK_COLS).issubset(set(df0.columns)):
-        df = df0[ZEEK_COLS].copy()
-    else:
-        df = pd.read_csv(conn_csv, header=None, names=ZEEK_COLS)
+def load_zeek_conn(conn_csv: str) -> pd.DataFrame:
+    cols = ["ts","orig_h","resp_h","orig_p","resp_p","proto","duration","orig_bytes","resp_bytes","orig_pkts","resp_pkts","conn_state"]
+    df0 = pd.read_csv(conn_csv, header=None, names=cols)
+    df = df0.copy()
 
     df["orig_p"] = pd.to_numeric(df["orig_p"], errors="coerce").fillna(0).astype(int)
     df["resp_p"] = pd.to_numeric(df["resp_p"], errors="coerce").fillna(0).astype(int)
+
     df["ts"] = pd.to_numeric(df["ts"], errors="coerce").fillna(0.0)
     df["duration"] = pd.to_numeric(df["duration"], errors="coerce").fillna(0.0)
 
@@ -29,17 +32,29 @@ def read_zeek_conn(conn_csv: str) -> pd.DataFrame:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
 
     df["proto"] = df["proto"].astype(str).str.upper()
+    proto_map = {"TCP": 6, "UDP": 17}
+    df["proto_num"] = df["proto"].map(proto_map).fillna(0).astype(int)
+
     df["start_ts"] = df["ts"]
     df["end_ts"] = df["ts"] + df["duration"]
 
-    df["orig_ip_u32"] = df["orig_h"].apply(ip_to_u32)
-    df["resp_ip_u32"] = df["resp_h"].apply(ip_to_u32)
+    df["orig_ip_u32"] = df["orig_h"].apply(ip_to_u32_maybe)
+    df["resp_ip_u32"] = df["resp_h"].apply(ip_to_u32_maybe)
+
+    before = len(df)
+    df = df.dropna(subset=["orig_ip_u32","resp_ip_u32"]).copy()
+    dropped = before - len(df)
+    if dropped:
+        print(f"[*] Dropped {dropped} non-IPv4 Zeek rows (IPv6 not supported by eBPF collector yet).")
+
+    df["orig_ip_u32"] = df["orig_ip_u32"].astype("uint32")
+    df["resp_ip_u32"] = df["resp_ip_u32"].astype("uint32")
 
     return df
 
-def read_ebpf_agg(jsonl: str) -> pd.DataFrame:
+def load_ebpf_agg(jsonl: str) -> pd.DataFrame:
     rows = []
-    with open(jsonl, "r", encoding="utf-8") as f:
+    with open(jsonl, "r") as f:
         for line in f:
             line = line.strip()
             if line:
@@ -48,94 +63,83 @@ def read_ebpf_agg(jsonl: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     df = pd.DataFrame(rows)
-
-    if "saddr_be" in df.columns and "daddr_be" in df.columns:
-        df["saddr_u32"] = df["saddr_be"].astype("uint32").apply(u32be_to_u32)
-        df["daddr_u32"] = df["daddr_be"].astype("uint32").apply(u32be_to_u32)
-    elif "saddr" in df.columns and "daddr" in df.columns:
-        df["saddr_u32"] = df["saddr"].astype("uint32").apply(u32be_to_u32)
-        df["daddr_u32"] = df["daddr"].astype("uint32").apply(u32be_to_u32)
-    else:
-        raise ValueError("eBPF JSONL missing address fields (expected saddr_be/daddr_be or saddr/daddr).")
-
-    df["sport"] = pd.to_numeric(df.get("sport", 0), errors="coerce").fillna(0).astype(int)
-    df["dport"] = pd.to_numeric(df.get("dport", 0), errors="coerce").fillna(0).astype(int)
-    df["proto"] = pd.to_numeric(df.get("proto", 0), errors="coerce").fillna(0).astype(int)
-
-    if "first_epoch_ns" in df.columns and "last_epoch_ns" in df.columns:
-        df["first_ts_s"] = pd.to_numeric(df["first_epoch_ns"], errors="coerce").fillna(0.0) / 1e9
-        df["last_ts_s"] = pd.to_numeric(df["last_epoch_ns"], errors="coerce").fillna(0.0) / 1e9
-        df["time_base"] = "epoch"
-    elif "first_ts_ns" in df.columns and "last_ts_ns" in df.columns:
-        df["first_ts_s"] = pd.to_numeric(df["first_ts_ns"], errors="coerce").fillna(0.0) / 1e9
-        df["last_ts_s"] = pd.to_numeric(df["last_ts_ns"], errors="coerce").fillna(0.0) / 1e9
-        df["time_base"] = "monotonic"
-    else:
-        df["first_ts_s"] = 0.0
-        df["last_ts_s"] = 0.0
-        df["time_base"] = "unknown"
-
+    df["saddr_u32"] = df["saddr"].astype("uint32").apply(u32be_to_u32)
+    df["daddr_u32"] = df["daddr"].astype("uint32").apply(u32be_to_u32)
+    df["sport"] = df["sport"].astype(int)
+    df["dport"] = df["dport"].astype(int)
+    df["proto"] = df["proto"].astype(int)
+    df["first_ts_s"] = df["first_ts_ns"].astype(float) / 1e9
+    df["last_ts_s"] = df["last_ts_ns"].astype(float) / 1e9
     return df
 
-def add_ebpf_cols(df: pd.DataFrame) -> pd.DataFrame:
-    df["ebpf_bytes_sent"] = pd.to_numeric(df.get("bytes_sent", 0), errors="coerce").fillna(0).astype(float)
-    df["ebpf_bytes_recv"] = pd.to_numeric(df.get("bytes_recv", 0), errors="coerce").fillna(0).astype(float)
-    df["ebpf_retransmits"] = pd.to_numeric(df.get("retransmits", 0), errors="coerce").fillna(0).astype(float)
-    df["ebpf_state_changes"] = pd.to_numeric(df.get("state_changes", 0), errors="coerce").fillna(0).astype(float)
-    df["ebpf_samples"] = pd.to_numeric(df.get("samples", 0), errors="coerce").fillna(0).astype(float)
+def normalize_key(df: pd.DataFrame, prefix: str = "") -> pd.DataFrame:
+    df = df.copy()
+    df["k_saddr"] = df[f"{prefix}saddr_u32"].astype("uint32")
+    df["k_daddr"] = df[f"{prefix}daddr_u32"].astype("uint32")
+    df["k_sport"] = df[f"{prefix}sport"].astype(int)
+    df["k_dport"] = df[f"{prefix}dport"].astype(int)
+    df["k_proto"] = df[f"{prefix}proto"].astype(int)
     return df
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--zeek_conn", required=True, help="Zeek conn.csv")
-    ap.add_argument("--ebpf_agg", required=True, help="netmon ebpf_agg.jsonl")
-    ap.add_argument("--out", required=True, help="Output CSV")
-    ap.add_argument("--time_slop", type=float, default=5.0, help="Seconds allowed for time overlap")
-    ap.add_argument("--allow_monotonic", action="store_true",
-                    help="Allow merging even if eBPF timestamps are monotonic (coverage may be wrong)")
+    ap.add_argument("--zeek_conn", required=True)
+    ap.add_argument("--ebpf_agg", required=True)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--time_slop", type=float, default=5.0)
     args = ap.parse_args()
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
 
-    z = read_zeek_conn(args.zeek_conn)
-    e = read_ebpf_agg(args.ebpf_agg)
-
-    proto_map = {"TCP": 6, "UDP": 17}
-    z["proto_num"] = z["proto"].map(proto_map).fillna(0).astype(int)
+    z = load_zeek_conn(args.zeek_conn)
+    e = load_ebpf_agg(args.ebpf_agg)
 
     if e.empty:
         out = z.copy()
-        for c in ["ebpf_bytes_sent","ebpf_bytes_recv","ebpf_retransmits","ebpf_state_changes","ebpf_samples","match_dir","overlap_s"]:
+        for c in ["ebpf_bytes_sent","ebpf_bytes_recv","ebpf_retransmits","ebpf_state_changes","ebpf_samples"]:
             out[c] = 0.0
         out.to_csv(args.out, index=False)
         print(f"[!] No eBPF data. Wrote Zeek-only: {args.out}")
         return
 
-    if (e["time_base"] == "monotonic").any() and not args.allow_monotonic:
-        print("[!] eBPF timestamps look monotonic (ns since boot).")
-        print("    Rebuild netmon to emit first_epoch_ns/last_epoch_ns, or rerun with --allow_monotonic.")
-        return
+    # Drop Zeek string proto column during keying to avoid duplicate name issues
+    z_key = z.drop(columns=["proto"], errors="ignore")
 
-    z = z.reset_index(drop=True)
-    z["zeek_row"] = z.index.astype(int)
+    z_fwd = z_key.rename(columns={
+        "orig_ip_u32": "saddr_u32",
+        "resp_ip_u32": "daddr_u32",
+        "orig_p": "sport",
+        "resp_p": "dport",
+        "proto_num": "proto",
+    })
+    z_rev = z_key.rename(columns={
+        "orig_ip_u32": "daddr_u32",
+        "resp_ip_u32": "saddr_u32",
+        "orig_p": "dport",
+        "resp_p": "sport",
+        "proto_num": "proto",
+    })
 
-    m1 = z.merge(
+    z_fwd = normalize_key(z_fwd)
+    z_rev = normalize_key(z_rev)
+    e = normalize_key(e)
+
+    merged_fwd = z_fwd.merge(
         e,
-        left_on=["orig_ip_u32","resp_ip_u32","orig_p","resp_p","proto_num"],
-        right_on=["saddr_u32","daddr_u32","sport","dport","proto"],
-        how="left"
+        on=["k_saddr","k_daddr","k_sport","k_dport","k_proto"],
+        how="left",
+        suffixes=("", "_e"),
     )
-    m1["match_dir"] = "orig_resp"
-
-    m2 = z.merge(
+    merged_rev = z_rev.merge(
         e,
-        left_on=["orig_ip_u32","resp_ip_u32","orig_p","resp_p","proto_num"],
-        right_on=["daddr_u32","saddr_u32","dport","sport","proto"],
-        how="left"
+        on=["k_saddr","k_daddr","k_sport","k_dport","k_proto"],
+        how="left",
+        suffixes=("", "_e"),
     )
-    m2["match_dir"] = "resp_orig"
 
-    merged = pd.concat([m1, m2], ignore_index=True)
+    merged = merged_fwd.copy()
+    choose_rev = merged["first_ts_s"].isna() & merged_rev["first_ts_s"].notna()
+    merged.loc[choose_rev, merged.columns] = merged_rev.loc[choose_rev, merged.columns]
 
     has = merged["first_ts_s"].notna()
     ok = (
@@ -145,35 +149,21 @@ def main():
     )
     merged = merged[ok].copy()
 
-    # If multiple eBPF rows match one Zeek row, keep the one with best time overlap
-    # overlap = min(end_ts, last_ts_s) - max(start_ts, first_ts_s)
-    merged["overlap_s"] = 0.0
-    has = merged["first_ts_s"].notna()
-    merged.loc[has, "overlap_s"] = (
-        (merged.loc[has, ["end_ts","last_ts_s"]].min(axis=1)) -
-        (merged.loc[has, ["start_ts","first_ts_s"]].max(axis=1))
-    )
-
-    merged = merged.sort_values(["zeek_row","overlap_s"], ascending=[True, False])
-    merged = merged.drop_duplicates(subset=["zeek_row"], keep="first").copy()
-
-    merged = add_ebpf_cols(merged)
+    merged["ebpf_bytes_sent"] = merged["bytes_sent"].fillna(0).astype(float)
+    merged["ebpf_bytes_recv"] = merged["bytes_recv"].fillna(0).astype(float)
+    merged["ebpf_retransmits"] = merged["retransmits"].fillna(0).astype(float)
+    merged["ebpf_state_changes"] = merged["state_changes"].fillna(0).astype(float)
+    merged["ebpf_samples"] = merged["samples"].fillna(0).astype(float)
 
     out_cols = [
         "ts","duration","orig_h","resp_h","orig_p","resp_p","proto","conn_state",
         "orig_bytes","resp_bytes","orig_pkts","resp_pkts",
         "start_ts","end_ts",
-        "ebpf_bytes_sent","ebpf_bytes_recv","ebpf_retransmits","ebpf_state_changes","ebpf_samples",
-        "match_dir","overlap_s"
+        "ebpf_bytes_sent","ebpf_bytes_recv","ebpf_retransmits","ebpf_state_changes","ebpf_samples"
     ]
     merged[out_cols].to_csv(args.out, index=False)
     print(f"[*] Wrote enriched flows: {args.out}")
-
-    total = len(merged)
-    matched = int((merged["ebpf_samples"] > 0).sum())
-    print(f"[*] Merge coverage: {matched}/{total} ({matched/total:.4f}) rows have ebpf_samples>0")
-    print("[*] match_dir counts:")
-    print(merged["match_dir"].value_counts(dropna=False).to_string())
+    print(f"[*] Enriched matches: {int(has.sum())}/{len(merged)}")
 
 if __name__ == "__main__":
     main()
