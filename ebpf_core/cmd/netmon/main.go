@@ -17,25 +17,29 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
+	"github.com/cilium/ebpf/rlimit"
 	"golang.org/x/sys/unix"
 )
 
 type Event struct {
 	TsMonoNs   uint64
 	SockCookie uint64
-	Pid        uint32
-	Uid        uint32
-	Saddr      uint32
-	Daddr      uint32
-	Sport      uint16
-	Dport      uint16
-	Proto      uint8
-	Evtype     uint8
-	Pad        uint16
-	StateOld   uint32
-	StateNew   uint32
-	Bytes      uint64
-	Comm       [16]byte
+
+	Pid  uint32
+	Uid  uint32
+	Saddr uint32
+	Daddr uint32
+	Sport uint16
+	Dport uint16
+	Proto uint8
+
+	Evtype   uint8
+	StateOld uint32
+	StateNew uint32
+
+	Bytes       uint64
+	Retransmits uint32
+	Comm        [16]byte
 }
 
 type FlowKey struct {
@@ -44,52 +48,112 @@ type FlowKey struct {
 	Sport uint16
 	Dport uint16
 	Proto uint8
-
-	// Improves correlation vs plain 5-tuple
-	SockCookie uint64
 }
 
 type FlowAgg struct {
-	FirstMonoNs  uint64
-	LastMonoNs   uint64
-	FirstEpochNs int64
-	LastEpochNs  int64
-	BytesSent    uint64
-	BytesRecv    uint64
-	Retransmits  uint64
-	StateChanges uint64
-	Samples      uint64
+	FirstMonoNs uint64 `json:"first_ts_ns"`
+	LastMonoNs  uint64 `json:"last_ts_ns"`
 
-	PidLast  uint32
-	UidLast  uint32
-	CommLast string
+	FirstEpochS float64 `json:"first_ts_s"`
+	LastEpochS  float64 `json:"last_ts_s"`
+	FlushEpochS float64 `json:"flush_ts_s"`
+
+	Saddr uint32 `json:"saddr"`
+	Daddr uint32 `json:"daddr"`
+	Sport uint16 `json:"sport"`
+	Dport uint16 `json:"dport"`
+	Proto uint8  `json:"proto"`
+
+	SaddrStr string `json:"saddr_str"`
+	DaddrStr string `json:"daddr_str"`
+
+	BytesSent    uint64 `json:"bytes_sent"`
+	BytesRecv    uint64 `json:"bytes_recv"`
+	Retransmits  uint32 `json:"retransmits"`
+	StateChanges uint32 `json:"state_changes"`
+	Samples      uint64 `json:"samples"`
+
+	PidMode  uint32 `json:"pid_mode"`
+	UidMode  uint32 `json:"uid_mode"`
+	CommMode string `json:"comm_mode"`
 }
 
-func monotonicNs() int64 {
-	var ts unix.Timespec
-	_ = unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts)
-	return ts.Nano()
+type RawEventOut struct {
+	TsMonoNs   uint64  `json:"ts_ns"`
+	TsEpochS   float64 `json:"ts_s"`
+	SockCookie uint64  `json:"sock_cookie"`
+
+	Pid  uint32 `json:"pid"`
+	Uid  uint32 `json:"uid"`
+	Comm string `json:"comm"`
+
+	Saddr uint32 `json:"saddr"`
+	Daddr uint32 `json:"daddr"`
+	Sport uint16 `json:"sport"`
+	Dport uint16 `json:"dport"`
+	Proto uint8  `json:"proto"`
+
+	SaddrStr string `json:"saddr_str"`
+	DaddrStr string `json:"daddr_str"`
+
+	Evtype   uint8  `json:"evtype"`
+	StateOld uint32 `json:"state_old"`
+	StateNew uint32 `json:"state_new"`
+
+	Bytes       uint64 `json:"bytes"`
+	Retransmits uint32 `json:"retransmits"`
 }
 
-func ipToString(u uint32) string {
-	ip := make(net.IP, 4)
-	// u is already “network integer” (because bpf code does ntohl),
-	// so BigEndian gives correct dotted IPv4.
-	binary.BigEndian.PutUint32(ip, u)
-	return ip.String()
+func ntohl(u uint32) uint32 {
+	return (u&0x000000FF)<<24 |
+		(u&0x0000FF00)<<8 |
+		(u&0x00FF0000)>>8 |
+		(u&0xFF000000)>>24
+}
+
+func u32ToIPv4StrBE(u uint32) string {
+	b := []byte{byte(u >> 24), byte(u >> 16), byte(u >> 8), byte(u)}
+	return net.IP(b).String()
+}
+
+func cstr(b []byte) string {
+	n := bytes.IndexByte(b, 0)
+	if n == -1 {
+		n = len(b)
+	}
+	return string(b[:n])
+}
+
+func monoToEpochSec(monoNs uint64, baseEpoch time.Time, baseMonoNs uint64) float64 {
+	if monoNs < baseMonoNs {
+		return float64(baseEpoch.UnixNano()) / 1e9
+	}
+	delta := time.Duration(monoNs - baseMonoNs)
+	return float64(baseEpoch.Add(delta).UnixNano()) / 1e9
+}
+
+func must(err error) {
+	if err != nil {
+		panic(err)
+	}
 }
 
 func main() {
 	var objPath string
 	var outPath string
+	var eventsPath string
 	var flushSec int
-	var debugEvents bool
+	var mode string
 
 	flag.StringVar(&objPath, "obj", "netmon.bpf.o", "compiled BPF object")
-	flag.StringVar(&outPath, "out", "ebpf_agg.jsonl", "output JSONL (flow-level aggregates)")
+	flag.StringVar(&outPath, "out", "/tmp/ebpf_agg.jsonl", "flow aggregate JSONL output")
+	flag.StringVar(&eventsPath, "events", "", "raw event JSONL output (optional)")
 	flag.IntVar(&flushSec, "flush", 5, "flush interval seconds")
-	flag.BoolVar(&debugEvents, "debug_events", false, "print decoded events to stdout")
+	flag.StringVar(&mode, "mode", "flow", "one of: flow|event|both")
 	flag.Parse()
+
+	// Avoid memlock issues on some systems
+	_ = rlimit.RemoveMemlock()
 
 	spec, err := ebpf.LoadCollectionSpec(objPath)
 	must(err)
@@ -104,189 +168,179 @@ func main() {
 	}
 
 	// Attach programs
-	var links []link.Link
-	defer func() {
-		for _, l := range links {
-			_ = l.Close()
-		}
-	}()
+	tp, err := link.Tracepoint("sock", "inet_sock_set_state", coll.Programs["tp_inet_sock_set_state"], nil)
+	must(err)
+	defer tp.Close()
 
-	attach := func(l link.Link, err error) {
-		must(err)
-		links = append(links, l)
-	}
+	kpSend, err := link.Kprobe("tcp_sendmsg", coll.Programs["kp_tcp_sendmsg"], nil)
+	must(err)
+	defer kpSend.Close()
 
-	attach(link.Tracepoint("sock", "inet_sock_set_state", coll.Programs["tp_inet_sock_set_state"], nil))
-	attach(link.Kprobe("tcp_sendmsg", coll.Programs["kp_tcp_sendmsg"], nil))
-	attach(link.Kprobe("tcp_cleanup_rbuf", coll.Programs["kp_tcp_cleanup_rbuf"], nil))
-	attach(link.Kprobe("tcp_retransmit_skb", coll.Programs["kp_tcp_retransmit_skb"], nil))
+	kpClnRbuf, err := link.Kprobe("tcp_cleanup_rbuf", coll.Programs["kp_tcp_cleanup_rbuf"], nil)
+	must(err)
+	defer kpClnRbuf.Close()
+
+	kpRetransmit, err := link.Kprobe("tcp_retransmit_skb", coll.Programs["kp_tcp_retransmit_skb"], nil)
+	must(err)
+	defer kpRetransmit.Close()
 
 	rd, err := ringbuf.NewReader(rbMap)
 	must(err)
 	defer rd.Close()
 
-	// Time alignment: map monotonic -> epoch
-	startWallNs := time.Now().UnixNano()
-	startMonoNs := monotonicNs()
+	// Monotonic → epoch base
+	var ts unix.Timespec
+	must(unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts))
+	baseMonoNs := uint64(ts.Sec)*1e9 + uint64(ts.Nsec)
+	baseEpoch := time.Now()
 
-	// Output file
-	f, err := os.OpenFile(outPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
-	must(err)
-	defer f.Close()
-	w := bufio.NewWriterSize(f, 1<<20)
-	defer w.Flush()
-
-	// Aggregation store
+	flows := make(map[FlowKey]*FlowAgg)
 	var mu sync.Mutex
-	flows := map[FlowKey]*FlowAgg{}
 
-	monoToEpoch := func(mono uint64) int64 {
-		// epoch_ns = startWall + (mono - startMono)
-		return startWallNs + int64(mono) - startMonoNs
+	outFile, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	must(err)
+	defer outFile.Close()
+	outW := bufio.NewWriter(outFile)
+	defer outW.Flush()
+
+	var evW *bufio.Writer
+	if eventsPath != "" {
+		evFile, err := os.OpenFile(eventsPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		must(err)
+		defer evFile.Close()
+		evW = bufio.NewWriter(evFile)
+		defer evW.Flush()
 	}
 
 	flush := func() {
 		mu.Lock()
 		defer mu.Unlock()
 
-		flushWall := time.Now().UnixNano()
-		for k, a := range flows {
-			row := map[string]any{
-				"flush_wall_ts_ns": flushWall,
-				"saddr":       		ipToString(k.Saddr),
-				"daddr":       		ipToString(k.Daddr),
-				"saddr_u32":   		k.Saddr,
-				"daddr_u32":   		k.Daddr,
-				"sport":       		k.Sport,
-				"dport":      		k.Dport,
-				"proto":      		k.Proto,
-				"sock_cookie":   	k.SockCookie,
-				"first_mono_ns":  	a.FirstMonoNs,
-				"last_mono_ns":   	a.LastMonoNs,
-				"first_epoch_ns": 	a.FirstEpochNs,
-				"last_epoch_ns": 	a.LastEpochNs,
-				"bytes_sent":   	a.BytesSent,
-				"bytes_recv":   	a.BytesRecv,
-				"retransmits":  	a.Retransmits,
-				"state_changes": 	a.StateChanges,
-				"samples":       	a.Samples,
-				"pid_last":  		a.PidLast,
-				"uid_last":  		a.UidLast,
-				"comm_last": 		a.CommLast,
-			}
-
-			b, _ := json.Marshal(row)
-			_, _ = w.Write(append(b, '\n'))
-			delete(flows, k)
+		nowEpoch := float64(time.Now().UnixNano()) / 1e9
+		for _, a := range flows {
+			a.FlushEpochS = nowEpoch
+			b, _ := json.Marshal(a)
+			outW.Write(b)
+			outW.WriteByte('\n')
 		}
-		_ = w.Flush()
+		outW.Flush()
+		flows = make(map[FlowKey]*FlowAgg)
 	}
 
 	ticker := time.NewTicker(time.Duration(flushSec) * time.Second)
 	defer ticker.Stop()
 
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	stopCh := make(chan os.Signal, 2)
+	signal.Notify(stopCh, os.Interrupt, syscall.SIGTERM)
+
+	fmt.Println("[*] eBPF collector running (Ctrl+C to stop)")
 
 	go func() {
 		for range ticker.C {
-			flush()
+			if mode == "flow" || mode == "both" {
+				flush()
+			}
 		}
 	}()
 
-	fmt.Println("[*] eBPF collector running (Ctrl+C to stop)")
 	for {
 		select {
-		case <-stop:
+		case <-stopCh:
 			fmt.Println("[*] stopping, final flush...")
-			flush()
+			if mode == "flow" || mode == "both" {
+				flush()
+			}
 			return
 
 		default:
 			rec, err := rd.Read()
 			if err != nil {
-				if err == ringbuf.ErrClosed {
-					return
-				}
 				continue
 			}
 
 			var e Event
 			must(binary.Read(bytes.NewBuffer(rec.RawSample), binary.LittleEndian, &e))
 
-			if debugEvents {
-				fmt.Printf("ev=%d pid=%d uid=%d %s:%d -> %s:%d bytes=%d cookie=%d comm=%q\n",
-					e.Evtype, e.Pid, e.Uid,
-					ipToString(e.Saddr), e.Sport, ipToString(e.Daddr), e.Dport,
-					e.Bytes, e.SockCookie, cstr(e.Comm[:]),
-				)
-			}
+			// Convert kernel big-endian IPv4 to dotted string
+			saddrStr := u32ToIPv4StrBE(ntohl(e.Saddr))
+			daddrStr := u32ToIPv4StrBE(ntohl(e.Daddr))
+			commStr := cstr(e.Comm[:])
+			evEpoch := monoToEpochSec(e.TsMonoNs, baseEpoch, baseMonoNs)
 
-			key := FlowKey{
-				Saddr:       e.Saddr,
-				Daddr:       e.Daddr,
-				Sport:       e.Sport,
-				Dport:       e.Dport,
-				Proto:       e.Proto,
-				SockCookie:  e.SockCookie,
-			}
-
-			epoch := monoToEpoch(e.TsMonoNs)
-
-			mu.Lock()
-			a := flows[key]
-			if a == nil {
-				a = &FlowAgg{
-					FirstMonoNs:  e.TsMonoNs,
-					LastMonoNs:   e.TsMonoNs,
-					FirstEpochNs: epoch,
-					LastEpochNs:  epoch,
-					PidLast:      e.Pid,
-					UidLast:      e.Uid,
-					CommLast:     cstr(e.Comm[:]),
+			if (mode == "event" || mode == "both") && evW != nil {
+				out := RawEventOut{
+					TsMonoNs:   e.TsMonoNs,
+					TsEpochS:   evEpoch,
+					SockCookie: e.SockCookie,
+					Pid:        e.Pid,
+					Uid:        e.Uid,
+					Comm:       commStr,
+					Saddr:      e.Saddr,
+					Daddr:      e.Daddr,
+					Sport:      e.Sport,
+					Dport:      e.Dport,
+					Proto:      e.Proto,
+					SaddrStr:   saddrStr,
+					DaddrStr:   daddrStr,
+					Evtype:     e.Evtype,
+					StateOld:   e.StateOld,
+					StateNew:   e.StateNew,
+					Bytes:      e.Bytes,
+					Retransmits: e.Retransmits,
 				}
-				flows[key] = a
+				b, _ := json.Marshal(out)
+				evW.Write(b)
+				evW.WriteByte('\n')
+				evW.Flush()
 			}
 
-			if e.TsMonoNs < a.FirstMonoNs {
-				a.FirstMonoNs = e.TsMonoNs
-				a.FirstEpochNs = epoch
-			}
-			if e.TsMonoNs > a.LastMonoNs {
+			if mode == "flow" || mode == "both" {
+				k := FlowKey{Saddr: e.Saddr, Daddr: e.Daddr, Sport: e.Sport, Dport: e.Dport, Proto: e.Proto}
+
+				mu.Lock()
+				a := flows[k]
+				if a == nil {
+					a = &FlowAgg{
+						FirstMonoNs: e.TsMonoNs,
+						LastMonoNs:  e.TsMonoNs,
+						FirstEpochS: evEpoch,
+						LastEpochS:  evEpoch,
+						Saddr:       e.Saddr,
+						Daddr:       e.Daddr,
+						Sport:       e.Sport,
+						Dport:       e.Dport,
+						Proto:       e.Proto,
+						SaddrStr:    saddrStr,
+						DaddrStr:    daddrStr,
+						PidMode:     e.Pid,
+						UidMode:     e.Uid,
+						CommMode:    commStr,
+					}
+					flows[k] = a
+				}
+
 				a.LastMonoNs = e.TsMonoNs
-				a.LastEpochNs = epoch
-			}
+				a.LastEpochS = evEpoch
+				a.Samples++
 
-			a.Samples++
-			a.PidLast = e.Pid
-			a.UidLast = e.Uid
-			a.CommLast = cstr(e.Comm[:])
+				// last-seen process (simple mode; can be improved to “mode” stats later)
+				a.PidMode = e.Pid
+				a.UidMode = e.Uid
+				a.CommMode = commStr
 
-			switch e.Evtype {
-			case 2:
-				a.BytesSent += e.Bytes
-			case 3:
-				a.BytesRecv += e.Bytes
-			case 4:
-				a.Retransmits++
-			case 1:
-				a.StateChanges++
+				switch e.Evtype {
+				case 1:
+					a.StateChanges++
+				case 2:
+					a.BytesSent += e.Bytes
+				case 3:
+					a.BytesRecv += e.Bytes
+				case 4:
+					a.Retransmits += e.Retransmits
+				}
+
+				mu.Unlock()
 			}
-			mu.Unlock()
 		}
 	}
-}
-
-func must(err error) {
-	if err != nil {
-		panic(err)
-	}
-}
-
-func cstr(b []byte) string {
-	n := bytes.IndexByte(b, 0)
-	if n == -1 {
-		n = len(b)
-	}
-	return string(b[:n])
 }
