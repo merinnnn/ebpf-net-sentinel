@@ -206,7 +206,8 @@ int kp_tcp_sendmsg(struct pt_regs *ctx) {
   e.evtype = 2;
   e.bytes = (__u64)size;
 
-  submit_event_and_update(&e, &k);
+  update_flow(&k, &e);
+  emit_event(&e);
   return 0;
 }
 
@@ -225,7 +226,8 @@ int kp_tcp_cleanup_rbuf(struct pt_regs *ctx) {
   e.evtype = 3;
   e.bytes = (__u64)copied;
 
-  submit_event_and_update(&e, &k);
+  update_flow(&k, &e);
+  emit_event(&e);
   return 0;
 }
 
@@ -242,6 +244,7 @@ int kp_tcp_retransmit_skb(struct pt_regs *ctx) {
   e.evtype = 4;
   e.bytes = 0;
 
-  submit_event_and_update(&e, &k);
+  update_flow(&k, &e);
+  emit_event(&e);
   return 0;
 }
