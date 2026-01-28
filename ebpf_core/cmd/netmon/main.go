@@ -22,24 +22,31 @@ import (
 )
 
 type Event struct {
-	TsMonoNs   uint64
-	SockCookie uint64
+	TsNs uint64
 
-	Pid  uint32
-	Uid  uint32
+	Pid uint32
+	Uid uint32
+
 	Saddr uint32
 	Daddr uint32
+
 	Sport uint16
 	Dport uint16
-	Proto uint8
 
-	Evtype   uint8
+	Proto  uint8
+	Evtype uint8
+
+	Pad0 uint16 // padding to align next uint32
+
 	StateOld uint32
 	StateNew uint32
 
 	Bytes       uint64
 	Retransmits uint32
-	Comm        [16]byte
+
+	Pad1 uint32 // padding so Comm lands correctly / total size matches C
+
+	Comm [16]byte
 }
 
 type FlowKey struct {
@@ -255,6 +262,15 @@ func main() {
 		default:
 			rec, err := rd.Read()
 			if err != nil {
+				if err == ringbuf.ErrClosed {
+					return
+				}
+				continue
+			}
+
+			want := binary.Size(Event{})
+			if len(record.RawSample) < want {
+				// Skip malformed / short samples instead of panicking
 				continue
 			}
 
