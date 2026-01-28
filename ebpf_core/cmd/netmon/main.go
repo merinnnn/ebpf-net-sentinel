@@ -86,9 +86,8 @@ type FlowAgg struct {
 }
 
 type RawEventOut struct {
-	TsMonoNs   uint64  `json:"ts_ns"`
-	TsEpochS   float64 `json:"ts_s"`
-	SockCookie uint64  `json:"sock_cookie"`
+	TsMonoNs uint64  `json:"ts_ns"`
+	TsEpochS float64 `json:"ts_s"`
 
 	Pid  uint32 `json:"pid"`
 	Uid  uint32 `json:"uid"`
@@ -131,6 +130,7 @@ func cstr(b []byte) string {
 	return string(b[:n])
 }
 
+// Map monotonic (kernel) timestamps to wall-clock epoch seconds.
 func monoToEpochSec(monoNs uint64, baseEpoch time.Time, baseMonoNs uint64) float64 {
 	if monoNs < baseMonoNs {
 		return float64(baseEpoch.UnixNano()) / 1e9
@@ -159,7 +159,7 @@ func main() {
 	flag.StringVar(&mode, "mode", "flow", "one of: flow|event|both")
 	flag.Parse()
 
-	// Avoid memlock issues on some systems
+	// Avoid memlock issues
 	_ = rlimit.RemoveMemlock()
 
 	spec, err := ebpf.LoadCollectionSpec(objPath)
@@ -275,19 +275,18 @@ func main() {
 			}
 
 			var e Event
-			must(binary.Read(bytes.NewBuffer(rec.RawSample), binary.LittleEndian, &e))
+			must(binary.Read(bytes.NewBuffer(rec.RawSample[:want]), binary.LittleEndian, &e))
 
 			// Convert kernel big-endian IPv4 to dotted string
 			saddrStr := u32ToIPv4StrBE(ntohl(e.Saddr))
 			daddrStr := u32ToIPv4StrBE(ntohl(e.Daddr))
 			commStr := cstr(e.Comm[:])
-			evEpoch := monoToEpochSec(e.TsMonoNs, baseEpoch, baseMonoNs)
+			evEpoch := monoToEpochSec(e.TsNs, baseEpoch, baseMonoNs)
 
 			if (mode == "event" || mode == "both") && evW != nil {
 				out := RawEventOut{
-					TsMonoNs:   e.TsMonoNs,
+					TsMonoNs:   e.TsNs,
 					TsEpochS:   evEpoch,
-					SockCookie: e.SockCookie,
 					Pid:        e.Pid,
 					Uid:        e.Uid,
 					Comm:       commStr,
@@ -317,8 +316,8 @@ func main() {
 				a := flows[k]
 				if a == nil {
 					a = &FlowAgg{
-						FirstMonoNs: e.TsMonoNs,
-						LastMonoNs:  e.TsMonoNs,
+						FirstMonoNs: e.TsNs,
+						LastMonoNs:  e.TsNs,
 						FirstEpochS: evEpoch,
 						LastEpochS:  evEpoch,
 						Saddr:       e.Saddr,
@@ -335,11 +334,11 @@ func main() {
 					flows[k] = a
 				}
 
-				a.LastMonoNs = e.TsMonoNs
+				a.LastMonoNs = e.TsNs
 				a.LastEpochS = evEpoch
 				a.Samples++
 
-				// last-seen process (simple mode; can be improved to “mode” stats later)
+				// last-seen process (simple mode)
 				a.PidMode = e.Pid
 				a.UidMode = e.Uid
 				a.CommMode = commStr
