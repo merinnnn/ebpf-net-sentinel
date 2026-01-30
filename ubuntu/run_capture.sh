@@ -143,12 +143,14 @@ if echo "$HELP" | grep -q -- '--fixcsum'; then
 else
   echo "[!] tcpreplay does not support --fixcsum (old tcpreplay). Continuing without it." >&2
 fi
-
 if echo "$HELP" | grep -q -- '--mtu'; then
   TCP_ARGS+=( "--mtu" "1500" )
 fi
 if echo "$HELP" | grep -q -- '--mtu-trunc'; then
   TCP_ARGS+=( "--mtu-trunc" )
+fi
+if echo "$HELP" | grep -q -- '--stats'; then
+  TCP_ARGS+=( "--stats=1" )
 fi
 
 # Show version & chosen args
