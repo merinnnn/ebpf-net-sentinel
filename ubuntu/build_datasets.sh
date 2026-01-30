@@ -53,7 +53,8 @@ echo "[2/3] Create Zeek+eBPF enriched dataset"
 python3 "$ROOT_DIR/ubuntu/merge_zeek_ebpf.py" \
   --zeek_conn "$ZEEK_CONN" \
   --ebpf_agg "$EBPF_AGG" \
-  --out "$OUTDIR/zeek_ebpf.csv"
+  --out "$OUTDIR/zeek_ebpf.csv" \
+  --run_meta "$RUN_DIR/run_meta.json"
 
 if [[ -n "$SCENARIO" ]]; then
   echo "[3/3] Label datasets (scenario=$SCENARIO tz_offset_hours=$TZ_OFF)"
