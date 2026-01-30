@@ -6,13 +6,12 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"flag"
-	"fmt"
+	"log"
 	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -111,6 +110,12 @@ type RawEventOut struct {
 	Retransmits uint32 `json:"retransmits"`
 }
 
+func must(err error) {
+	if err != nil {
+		log.Fatalf("fatal: %v", err)
+	}
+}
+
 func ntohl(u uint32) uint32 {
 	return (u&0x000000FF)<<24 |
 		(u&0x0000FF00)<<8 |
@@ -140,20 +145,12 @@ func monoToEpochSec(monoNs uint64, baseEpoch time.Time, baseMonoNs uint64) float
 	return float64(baseEpoch.Add(delta).UnixNano()) / 1e9
 }
 
-func must(err error) {
-	if err != nil {
-		panic(err)
-	}
-}
-
 const (
 	ethPAll        uint16 = 0x0003 // ETH_P_ALL
 	packetOutgoing uint32 = 4      // PACKET_OUTGOING (matches BPF constant)
 )
 
-func htons(v uint16) uint16 {
-	return (v<<8)&0xff00 | (v>>8)&0x00ff
-}
+func htons(v uint16) uint16 { return (v<<8)&0xff00 | (v>>8)&0x00ff }
 
 // Open AF_PACKET socket bound to iface, for attaching socket filter (SO_ATTACH_BPF).
 func openAndBindAFPacket(iface string) (int, error) {
@@ -175,7 +172,6 @@ func openAndBindAFPacket(iface string) (int, error) {
 		_ = unix.Close(fd)
 		return -1, err
 	}
-
 	return fd, nil
 }
 
@@ -200,6 +196,25 @@ func readJSONFile(path string) (map[string]any, error) {
 	return m, nil
 }
 
+func writeJSONFileAtomic(path string, v any) error {
+	if path == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+
+	tmp := path + ".tmp"
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 func main() {
 	var objPath string
 	var outPath string
@@ -222,6 +237,12 @@ func main() {
 	flag.StringVar(&tcpreplayMetaPath, "tcpreplay_meta", "", "optional JSON file produced by run_capture.sh (embedded into run summary if present)")
 	flag.Parse()
 
+	if metaPath == "" {
+		// Keep behavior consistent with your script expectation: "run_meta.json"
+		// Script passes this anyway, but this prevents "missing meta" in manual runs.
+		metaPath = outPath + ".meta.json"
+	}
+
 	// Avoid memlock issues
 	_ = rlimit.RemoveMemlock()
 
@@ -234,10 +255,10 @@ func main() {
 
 	rbMap := coll.Maps["rb"]
 	if rbMap == nil {
-		panic("ringbuf map 'rb' not found")
+		log.Fatalf("ringbuf map 'rb' not found")
 	}
 
-	// Attach kprobes/tracepoints
+	// Attach programs (kprobes/tracepoints)
 	var links []link.Link
 	defer func() {
 		for _, l := range links {
@@ -245,12 +266,12 @@ func main() {
 		}
 	}()
 
-	// Optional packet capture socket filter for tcpreplay visibility.
+	// Optional socket filter for tcpreplay visibility.
 	pktFd := -1
 	if pktIface != "" {
 		prog := coll.Programs["sock_packet"]
 		if prog == nil {
-			panic("program 'sock_packet' not found in collection")
+			log.Fatalf("program 'sock_packet' not found in collection")
 		}
 
 		fd, err := openAndBindAFPacket(pktIface)
@@ -286,7 +307,7 @@ func main() {
 	must(err)
 	defer rd.Close()
 
-	// Close rd to unblock rd.Read()
+	// Stopping coordination: close rd to unblock rd.Read()
 	stopCh := make(chan os.Signal, 2)
 	signal.Notify(stopCh, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(stopCh)
@@ -299,6 +320,7 @@ func main() {
 			_ = rd.Close() // unblocks rd.Read()
 		})
 	}
+
 	go func() {
 		<-stopCh
 		stop()
@@ -312,11 +334,11 @@ func main() {
 
 	startTime := time.Now()
 
-	flows := make(map[FlowKey]*FlowAgg)
-	var mu sync.Mutex
-
 	var eventsRead uint64
 	var flowsFlushed uint64
+
+	flows := make(map[FlowKey]*FlowAgg)
+	var mu sync.Mutex
 
 	outFile, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	must(err)
@@ -345,20 +367,19 @@ func main() {
 			_ = outW.WriteByte('\n')
 		}
 		_ = outW.Flush()
-
-		atomic.AddUint64(&flowsFlushed, uint64(len(flows)))
+		flowsFlushed += uint64(len(flows))
 		flows = make(map[FlowKey]*FlowAgg)
 	}
 
-	// periodic flush, stops when stopping closes
-	ticker := time.NewTicker(time.Duration(flushSec) * time.Second)
-	defer ticker.Stop()
+	// periodic flush ticker
+	flushTicker := time.NewTicker(time.Duration(flushSec) * time.Second)
+	defer flushTicker.Stop()
 	go func() {
 		for {
 			select {
 			case <-stopping:
 				return
-			case <-ticker.C:
+			case <-flushTicker.C:
 				if mode == "flow" || mode == "both" {
 					flush()
 				}
@@ -366,7 +387,7 @@ func main() {
 		}
 	}()
 
-	// Periodic progress logs (stop on stopping)
+	// progress logger
 	progress := time.NewTicker(2 * time.Second)
 	defer progress.Stop()
 	go func() {
@@ -378,40 +399,40 @@ func main() {
 				mu.Lock()
 				nflows := len(flows)
 				mu.Unlock()
-				fmt.Printf("[*] progress: events=%d active_flows=%d flushed=%d out=%s\n",
-					atomic.LoadUint64(&eventsRead),
-					nflows,
-					atomic.LoadUint64(&flowsFlushed),
-					outPath,
-				)
+				log.Printf("[*] progress: events=%d active_flows=%d flushed=%d out=%s", eventsRead, nflows, flowsFlushed, outPath)
 			}
 		}
 	}()
 
-	fmt.Printf("[*] eBPF collector running (mode=%s flush=%ds pkt_iface=%q disable_kprobes=%v)\n",
-		mode, flushSec, pktIface, disableKprobes)
+	log.Printf(`[*] eBPF collector running (mode=%s flush=%ds pkt_iface=%q disable_kprobes=%v)`, mode, flushSec, pktIface, disableKprobes)
 
-	// Read loop; exits when rd is closed (SIGINT/SIGTERM or normal teardown)
+	// Main read loop
+	want := binary.Size(Event{})
 	for {
 		rec, err := rd.Read()
 		if err != nil {
 			if err == ringbuf.ErrClosed {
 				break
 			}
+			// transient error, keep going unless stopping requested
+			select {
+			case <-stopping:
+				break
+			default:
+			}
 			continue
 		}
 
-		want := binary.Size(Event{})
 		if len(rec.RawSample) < want {
-			// Skip malformed / short samples instead of panicking
 			continue
 		}
 
 		var e Event
-		must(binary.Read(bytes.NewBuffer(rec.RawSample[:want]), binary.LittleEndian, &e))
-		atomic.AddUint64(&eventsRead, 1)
+		if err := binary.Read(bytes.NewBuffer(rec.RawSample[:want]), binary.LittleEndian, &e); err != nil {
+			continue
+		}
+		eventsRead++
 
-		// Normalize addresses: BPF emits __be32; on little-endian hosts we must ntohl.
 		saddrU32 := ntohl(e.Saddr)
 		daddrU32 := ntohl(e.Daddr)
 		saddrStr := u32ToIPv4StrBE(saddrU32)
@@ -445,13 +466,7 @@ func main() {
 		}
 
 		if mode == "flow" || mode == "both" {
-			k := FlowKey{
-				Saddr: saddrU32,
-				Daddr: daddrU32,
-				Sport: e.Sport,
-				Dport: e.Dport,
-				Proto: e.Proto,
-			}
+			k := FlowKey{Saddr: saddrU32, Daddr: daddrU32, Sport: e.Sport, Dport: e.Dport, Proto: e.Proto}
 
 			mu.Lock()
 			a := flows[k]
@@ -479,7 +494,7 @@ func main() {
 			a.LastEpochS = evEpoch
 			a.Samples++
 
-			// last-seen process (best-effort; will be 0/65534 for pkt_iface path)
+			// last-seen process
 			a.PidMode = e.Pid
 			a.UidMode = e.Uid
 			a.CommMode = commStr
@@ -494,7 +509,7 @@ func main() {
 			case 4:
 				a.Retransmits += e.Retransmits
 			case 5:
-				// Packet events: state_old carries skb->pkt_type (PACKET_OUTGOING==4).
+				// packet events: state_old carries skb->pkt_type
 				if e.StateOld == packetOutgoing {
 					a.BytesSent += e.Bytes
 				} else {
@@ -505,8 +520,12 @@ func main() {
 		}
 	}
 
-	// Final flush + meta write
-	fmt.Println("[*] stopping, final flush...")
+	// Ensure we stop goroutines/tickers cleanly
+	stop()
+
+	log.Printf("[*] stopping, final flush...")
+
+	// Final flush
 	if mode == "flow" || mode == "both" {
 		flush()
 	}
@@ -515,11 +534,7 @@ func main() {
 		_ = evW.Flush()
 	}
 
-	finalMeta := metaPath
-	if finalMeta == "" {
-		finalMeta = outPath + ".meta.json"
-	}
-
+	// Write run meta ALWAYS
 	summary := map[string]any{
 		"start_rfc3339":   startTime.UTC().Format(time.RFC3339),
 		"end_rfc3339":     time.Now().UTC().Format(time.RFC3339),
@@ -531,8 +546,8 @@ func main() {
 		"mode":            mode,
 		"pkt_iface":       pktIface,
 		"disable_kprobes": disableKprobes,
-		"events_read":     atomic.LoadUint64(&eventsRead),
-		"flows_flushed":   atomic.LoadUint64(&flowsFlushed),
+		"events_read":     eventsRead,
+		"flows_flushed":   flowsFlushed,
 	}
 
 	if tcpreplayMetaPath != "" {
@@ -543,13 +558,11 @@ func main() {
 		}
 	}
 
-	if err := os.MkdirAll(filepath.Dir(finalMeta), 0o755); err == nil {
-		if b, err := json.MarshalIndent(summary, "", "  "); err == nil {
-			_ = os.WriteFile(finalMeta, b, 0o644)
-			fmt.Println("[*] wrote run meta:", finalMeta)
-		}
+	if err := writeJSONFileAtomic(metaPath, summary); err != nil {
+		log.Printf("[!] failed to write run meta: %v", err)
+	} else {
+		log.Printf("[*] wrote run meta: %s", metaPath)
 	}
 
-	// pktFd is handled by defer, but keep a safety reference so it’s not “unused”
-	_ = pktFd
+	_ = pktFd // kept for clarity; cleaned by defers
 }
