@@ -46,6 +46,11 @@ if [[ ! -f "$ZEEK_CONN" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$EBPF_AGG" ]]; then
+  echo "[!] Missing: $EBPF_AGG" >&2
+  exit 1
+fi
+
 echo "[1/3] Create Zeek-only dataset"
 python3 "$ROOT_DIR/ubuntu/make_zeek_only.py" --in_csv "$ZEEK_CONN" --out_csv "$OUTDIR/zeek_only.csv"
 
