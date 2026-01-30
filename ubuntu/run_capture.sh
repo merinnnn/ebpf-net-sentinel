@@ -1,224 +1,316 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PCAP_IN="${1:?Usage: run_capture.sh <pcap|pcap_filename> [iface|auto] [mbps]}"
-IFACE="${2:-auto}"
-MBPS="${3:-100}"
+# Usage:
+#   bash ubuntu/run_capture.sh <pcap_name_or_path> <IFACE_CAPTURE> <MBPS>
+#
+# Optional env:
+#   REPLAY_IFACE=<iface>     # where tcpreplay sends packets (default: IFACE_CAPTURE)
+#   FLUSH_SECS=5             # netmon flush period (default: 5)
+#   DISABLE_KPROBES=1        # default: 1
+#   MODE=flow                # default: flow
+#   SET_MTU=9000             # optional: set MTU for IFACE_CAPTURE and REPLAY_IFACE before replay
+
+PCAP_IN="${1:-}"
+IFACE_CAPTURE="${2:-}"
+MBPS="${3:-}"
+
+if [[ -z "$PCAP_IN" || -z "$IFACE_CAPTURE" || -z "$MBPS" ]]; then
+  echo "Usage: bash ubuntu/run_capture.sh <pcap> <iface_capture> <mbps>"
+  exit 2
+fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STAMP="$(date +%F_%H%M%S)"
-OUTDIR="$ROOT_DIR/data/runs/$STAMP"
+DATA_DIR="$ROOT_DIR/data"
+PCAP_DIR="$DATA_DIR/cicids2017_pcap"
 
-ZEEK_RAW_DIR="$OUTDIR/zeek_raw"
-ZEEK_DIR="$OUTDIR/zeek"
-DATASETS_DIR="$OUTDIR/datasets"
-
-EBPF_OUT="$OUTDIR/ebpf_agg.jsonl"
-EBPF_EVENTS="$OUTDIR/ebpf_events.jsonl"
-
-NETMON_LOG="$OUTDIR/netmon.log"
-NETMON_PIDFILE="$OUTDIR/netmon.pid"
-TCPREPLAY_LOG="$OUTDIR/tcpreplay.log"
-TCPREPLAY_META="$OUTDIR/tcpreplay_meta.json"
-RUN_META="$OUTDIR/run_meta.json"
-
-mkdir -p "$OUTDIR" "$ZEEK_RAW_DIR" "$ZEEK_DIR" "$DATASETS_DIR"
-
-pick_default_iface() {
-  ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'
-}
-iface_exists() { ip link show "$1" >/dev/null 2>&1; }
-
-resolve_pcap() {
-  local in="$1"
-  if [[ -f "$in" ]]; then realpath "$in"; return 0; fi
-  local candidate="$ROOT_DIR/data/cicids2017_pcap/$in"
-  if [[ -f "$candidate" ]]; then realpath "$candidate"; return 0; fi
-  local found
-  found="$(find "$ROOT_DIR/data/cicids2017_pcap" -maxdepth 2 -type f -iname "$(basename "$in")" 2>/dev/null | head -n 2 || true)"
-  local count
-  count="$(printf "%s\n" "$found" | sed '/^$/d' | wc -l | tr -d ' ')"
-  if [[ "$count" == "1" ]]; then realpath "$found"; return 0; fi
-  echo "[!] PCAP not found: $in" >&2
-  ls -lah "$ROOT_DIR/data/cicids2017_pcap" | head -n 30 >&2
-  exit 1
-}
-
-stop_netmon() {
-  local pid="$1"
-  echo "[*] Stopping netmon (pid=$pid) ..."
-  sudo kill -INT "$pid" >/dev/null 2>&1 || true
-
-  # wait up to 8 seconds then escalate
-  for i in {1..8}; do
-    if ! kill -0 "$pid" >/dev/null 2>&1; then
-      echo "[*] netmon exited."
-      return 0
-    fi
-    sleep 1
-  done
-
-  echo "[!] netmon did not exit after SIGINT; sending SIGTERM..." >&2
-  sudo kill -TERM "$pid" >/dev/null 2>&1 || true
-  sleep 2
-
-  if kill -0 "$pid" >/dev/null 2>&1; then
-    echo "[!] netmon still running; sending SIGKILL..." >&2
-    sudo kill -KILL "$pid" >/dev/null 2>&1 || true
-  fi
-}
-
-cleanup() {
-  echo "[*] Cleanup..."
-  if [[ -n "${EBPF_PID:-}" ]]; then
-    stop_netmon "$EBPF_PID" || true
-    unset EBPF_PID
-  fi
-}
-trap cleanup EXIT
-
-PCAP="$(resolve_pcap "$PCAP_IN")"
-
-RESOLVED_IFACE="$IFACE"
-if [[ "$RESOLVED_IFACE" == "auto" || -z "$RESOLVED_IFACE" ]]; then
-  RESOLVED_IFACE="$(pick_default_iface || true)"
+if [[ -f "$PCAP_IN" ]]; then
+  PCAP_PATH="$(cd "$(dirname "$PCAP_IN")" && pwd)/$(basename "$PCAP_IN")"
+else
+  PCAP_PATH="$PCAP_DIR/$PCAP_IN"
 fi
-if [[ -z "${RESOLVED_IFACE:-}" || ! "$(iface_exists "$RESOLVED_IFACE" && echo ok)" ]]; then
-  echo "[!] Invalid interface: '${RESOLVED_IFACE:-}'" >&2
-  ip -o link show | awk -F': ' '{print "  - " $2}' >&2
+
+if [[ ! -f "$PCAP_PATH" ]]; then
+  echo "[x] PCAP not found: $PCAP_PATH"
   exit 1
 fi
+
+REPLAY_IFACE="${REPLAY_IFACE:-$IFACE_CAPTURE}"
+FLUSH_SECS="${FLUSH_SECS:-5}"
+MODE="${MODE:-flow}"
+DISABLE_KPROBES="${DISABLE_KPROBES:-1}"
+SET_MTU="${SET_MTU:-}"
+
+RUN_TS="$(date +%F_%H%M%S)"
+RUN_DIR="$DATA_DIR/runs/$RUN_TS"
+mkdir -p "$RUN_DIR"/{zeek,logs}
+
+DEBUG_LOG="$RUN_DIR/run_capture.debug.log"
+NETMON_LOG="$RUN_DIR/netmon.log"
+NETMON_PIDFILE="$RUN_DIR/netmon.pid"
+EBPF_AGG="$RUN_DIR/ebpf_agg.jsonl"
+EBPF_EVENTS="$RUN_DIR/ebpf_events.jsonl"
+RUN_META="$RUN_DIR/run_meta.json"
+TCPREPLAY_META="$RUN_DIR/tcpreplay_meta.json"
+
+exec > >(tee -a "$DEBUG_LOG") 2>&1
 
 echo "[*] Inputs:"
-echo "  PCAP : $PCAP"
-echo "  IFACE: $RESOLVED_IFACE"
+echo "  PCAP : $PCAP_PATH"
+echo "  IFACE: $IFACE_CAPTURE"
 echo "  MBPS : $MBPS"
-echo "  OUT  : $OUTDIR"
+echo "  OUT  : $RUN_DIR"
+echo "  REPLAY_IFACE: $REPLAY_IFACE"
+echo ""
+
+echo "[*] Debug log: $DEBUG_LOG"
 echo "[*] Tip: you can inspect this run folder anytime:"
-echo "  RUN=$OUTDIR"
+echo "  RUN=$RUN_DIR"
+echo ""
 
-echo "[1/5] Zeek flow extraction"
-pushd "$ZEEK_RAW_DIR" >/dev/null
-echo "  [*] zeek -r $PCAP"
-sudo zeek -r "$PCAP" >/dev/null
-popd >/dev/null
+NETMON_PID=""
 
-echo "  [*] convert conn.log -> zeek/conn.csv"
-python3 "$ROOT_DIR/ubuntu/zeek_conn_to_csv.py" \
-  --in  "$ZEEK_RAW_DIR/conn.log" \
-  --out "$ZEEK_DIR/conn.csv"
+cleanup() {
+  local rc=$?
+  if [[ $rc -ne 0 ]]; then
+    echo "[!] Cleanup handler fired (rc=$rc)"
+  fi
 
-echo "[2/5] Build eBPF collector"
-pushd "$ROOT_DIR/ebpf_core" >/dev/null
-make
-popd >/dev/null
+  if [[ -n "${NETMON_PID:-}" ]]; then
+    # Try graceful stop, then harder if needed.
+    if sudo kill -0 "$NETMON_PID" 2>/dev/null; then
+      echo "[*] Stopping netmon (pid=$NETMON_PID) ..."
+      sudo kill -INT "$NETMON_PID" 2>/dev/null || true
+      for _ in {1..30}; do
+        if ! sudo kill -0 "$NETMON_PID" 2>/dev/null; then break; fi
+        sleep 0.25
+      done
+      if sudo kill -0 "$NETMON_PID" 2>/dev/null; then
+        sudo kill -TERM "$NETMON_PID" 2>/dev/null || true
+        sleep 0.5
+      fi
+      if sudo kill -0 "$NETMON_PID" 2>/dev/null; then
+        sudo kill -KILL "$NETMON_PID" 2>/dev/null || true
+      fi
+    fi
+  fi
 
-echo "[3/5] Start eBPF collector (netmon)"
-
-# Launch netmon as root, but write the *actual* netmon PID to a pidfile we control.
-sudo bash -c "
-  set -e
-  \"$ROOT_DIR/ebpf_core/netmon\" \
-    -obj \"$ROOT_DIR/ebpf_core/netmon.bpf.o\" \
-    -out \"$EBPF_OUT\" \
-    -events \"$EBPF_EVENTS\" \
-    -flush 5 \
-    -mode flow \
-    -pkt_iface \"$RESOLVED_IFACE\" \
-    -disable_kprobes \
-    -meta \"$RUN_META\" \
-    -tcpreplay_meta \"$TCPREPLAY_META\" \
-    >\"$NETMON_LOG\" 2>&1 &
-  echo \$! > \"$NETMON_PIDFILE\"
-"
-
-EBPF_PID="$(cat "$NETMON_PIDFILE")"
-echo "  netmon pid: $EBPF_PID"
-sleep 2
-
-echo "[4/5] Replay PCAP (tcpreplay)"
-TCPREPLAY_START="$(date +%s)"
-
-# Build tcpreplay args based on supported options
-TCP_ARGS=( "--intf1" "$RESOLVED_IFACE" "--mbps" "$MBPS" )
-
-HELP="$(tcpreplay --help 2>&1 || true)"
-
-if echo "$HELP" | grep -q -- '--fixcsum'; then
-  TCP_ARGS+=( "--fixcsum" )
-else
-  echo "[!] tcpreplay does not support --fixcsum (old tcpreplay). Continuing without it." >&2
-fi
-if echo "$HELP" | grep -q -- '--mtu'; then
-  TCP_ARGS+=( "--mtu" "1500" )
-fi
-if echo "$HELP" | grep -q -- '--mtu-trunc'; then
-  TCP_ARGS+=( "--mtu-trunc" )
-fi
-if echo "$HELP" | grep -q -- '--stats'; then
-  TCP_ARGS+=( "--stats=1" )
-fi
-
-# Show version & chosen args
-echo "  [*] tcpreplay version: $(tcpreplay -V 2>&1 | grep -m1 -E 'tcpreplay \(|^tcpreplay ' || tcpreplay -V 2>&1 | tail -n 1)"
-echo "  [*] tcpreplay args: ${TCP_ARGS[*]}"
-
-set +e
-sudo tcpreplay "${TCP_ARGS[@]}" "$PCAP" >"$TCPREPLAY_LOG" 2>&1
-TCPREPLAY_RC=$?
-set -e
-TCPREPLAY_END="$(date +%s)"
-
-python3 - <<PY
-import json, os
-meta = {
-  "pcap": os.path.abspath("$PCAP"),
-  "iface": "$RESOLVED_IFACE",
-  "mbps": float("$MBPS"),
-  "start_epoch": int("$TCPREPLAY_START"),
-  "end_epoch": int("$TCPREPLAY_END"),
-  "duration_s": int("$TCPREPLAY_END") - int("$TCPREPLAY_START"),
-  "exit_code": int("$TCPREPLAY_RC"),
-  "log": os.path.abspath("$TCPREPLAY_LOG"),
+  # Ensure run_meta exists (create early, but keep this as final safety)
+  if [[ ! -f "$RUN_META" ]]; then
+    echo "[!] run_meta.json missing; writing fallback meta"
+    cat >"$RUN_META" <<EOF
+{
+  "pcap":"$PCAP_PATH",
+  "iface_capture":"$IFACE_CAPTURE",
+  "replay_iface":"$REPLAY_IFACE",
+  "mbps":$MBPS,
+  "run_dir":"$RUN_DIR",
+  "timestamp":"$RUN_TS",
+  "note":"fallback meta written by run_capture.sh"
 }
-with open("$TCPREPLAY_META", "w") as f:
-  json.dump(meta, f, indent=2)
-print("[*] Wrote tcpreplay meta:", "$TCPREPLAY_META")
+EOF
+  fi
+
+  exit $rc
+}
+trap cleanup EXIT INT TERM
+
+# Create meta EARLY so it's never missing even if netmon fails
+cat >"$RUN_META" <<EOF
+{
+  "pcap":"$PCAP_PATH",
+  "iface_capture":"$IFACE_CAPTURE",
+  "replay_iface":"$REPLAY_IFACE",
+  "mbps":$MBPS,
+  "run_dir":"$RUN_DIR",
+  "timestamp":"$RUN_TS"
+}
+EOF
+
+echo "[*] [1/5] Zeek flow extraction"
+ZEEK_LOG="$RUN_DIR/zeek.log"
+ZEEK_OUT_DIR="$RUN_DIR/zeek"
+mkdir -p "$ZEEK_OUT_DIR"
+
+echo "  [*] zeek -r $PCAP_PATH (logging -> $ZEEK_LOG)"
+(
+  cd "$ZEEK_OUT_DIR"
+  zeek -r "$PCAP_PATH" >"$ZEEK_LOG" 2>&1
+)
+
+if [[ ! -f "$ZEEK_OUT_DIR/conn.log" ]]; then
+  echo "[x] Zeek did not produce conn.log at $ZEEK_OUT_DIR/conn.log"
+  echo "    Last 80 lines of zeek.log:"
+  tail -n 80 "$ZEEK_LOG" || true
+  exit 1
+fi
+
+python3 - "$ZEEK_OUT_DIR/conn.log" "$ZEEK_OUT_DIR/conn.csv" <<'PY'
+import sys, csv
+
+in_path = sys.argv[1]
+out_path = sys.argv[2]
+
+wanted = [
+    ("ts", "ts"),
+    ("orig_h", "id.orig_h"),
+    ("resp_h", "id.resp_h"),
+    ("orig_p", "id.orig_p"),
+    ("resp_p", "id.resp_p"),
+    ("proto", "proto"),
+    ("duration", "duration"),
+    ("orig_bytes", "orig_bytes"),
+    ("resp_bytes", "resp_bytes"),
+    ("orig_pkts", "orig_pkts"),
+    ("resp_pkts", "resp_pkts"),
+    ("conn_state", "conn_state"),
+]
+
+fields = None
+unset_field = "-"
+empty_field = ""
+
+with open(in_path, "r", encoding="utf-8", errors="replace") as f:
+    for line in f:
+        line = line.rstrip("\n")
+        if not line.startswith("#"):
+            continue
+        if line.startswith("#unset_field"):
+            parts = line.split("\t", 1)
+            if len(parts) == 2:
+                unset_field = parts[1]
+        if line.startswith("#empty_field"):
+            parts = line.split("\t", 1)
+            if len(parts) == 2:
+                empty_field = parts[1]
+        if line.startswith("#fields"):
+            parts = line.split("\t")
+            fields = parts[1:]
+            break
+
+if not fields:
+    raise SystemExit("Could not find #fields line in conn.log")
+
+idx = {name: i for i, name in enumerate(fields)}
+missing = [src for _, src in wanted if src not in idx]
+if missing:
+    raise SystemExit(f"conn.log missing expected fields: {missing}")
+
+def norm(v: str) -> str:
+    if v == unset_field:
+        return ""
+    if empty_field and v == empty_field:
+        return ""
+    return v
+
+rows = 0
+with open(in_path, "r", encoding="utf-8", errors="replace") as fin, \
+     open(out_path, "w", newline="", encoding="utf-8") as fout:
+    w = csv.writer(fout)
+    for line in fin:
+        if not line or line.startswith("#"):
+            continue
+        parts = line.rstrip("\n").split("\t")
+        out = []
+        for _, src in wanted:
+            out.append(norm(parts[idx[src]]) if idx[src] < len(parts) else "")
+        w.writerow(out)
+        rows += 1
+
+print(f"Wrote {out_path} ({rows} rows)")
 PY
 
-if [[ $TCPREPLAY_RC -ne 0 ]]; then
-  echo "[!] tcpreplay failed (rc=$TCPREPLAY_RC). Showing last 60 lines:" >&2
-  tail -n 60 "$TCPREPLAY_LOG" >&2 || true
+echo "[*] Wrote $ZEEK_OUT_DIR/conn.csv"
+
+echo "[*] [2/5] Build eBPF collector"
+make -C "$ROOT_DIR/ebpf_core"
+
+# Optional MTU bump (helps tcpreplay "Message too long" on veth)
+if [[ -n "$SET_MTU" ]]; then
+  echo "[*] Setting MTU=$SET_MTU on $REPLAY_IFACE and $IFACE_CAPTURE (best-effort)"
+  sudo ip link set dev "$REPLAY_IFACE" mtu "$SET_MTU" 2>/dev/null || true
+  sudo ip link set dev "$IFACE_CAPTURE" mtu "$SET_MTU" 2>/dev/null || true
 fi
+
+echo "[*] [3/5] Start eBPF collector (netmon)"
+NETMON_BIN="$ROOT_DIR/ebpf_core/netmon"
+OBJ="$ROOT_DIR/ebpf_core/netmon.bpf.o"
+
+if [[ ! -x "$NETMON_BIN" ]]; then
+  echo "[x] netmon binary not found/executable: $NETMON_BIN"
+  exit 1
+fi
+if [[ ! -f "$OBJ" ]]; then
+  echo "[x] BPF object not found: $OBJ"
+  exit 1
+fi
+
+echo "[*]   netmon log file: $NETMON_LOG"
+echo "[*]   pid file: $NETMON_PIDFILE"
+
+START_ARGS=(
+  -obj "$OBJ"
+  -out "$EBPF_AGG"
+  -events "$EBPF_EVENTS"
+  -flush "$FLUSH_SECS"
+  -mode "$MODE"
+  -pkt_iface "$IFACE_CAPTURE"
+  -meta "$RUN_META"
+  -tcpreplay_meta "$TCPREPLAY_META"
+)
+if [[ "$DISABLE_KPROBES" == "1" ]]; then
+  START_ARGS+=( -disable_kprobes )
+fi
+
+# IMPORTANT: run netmon under sudo with memlock unlimited
+sudo bash -c "ulimit -l unlimited; exec '$NETMON_BIN' ${START_ARGS[*]}" >>"$NETMON_LOG" 2>&1 &
+NETMON_PID=$!
+echo "$NETMON_PID" >"$NETMON_PIDFILE"
+
+# Wait a moment and validate it stays alive
+sleep 0.3
+if ! sudo kill -0 "$NETMON_PID" 2>/dev/null; then
+  echo "[x] netmon died immediately. Last 120 lines:"
+  tail -n 120 "$NETMON_LOG" || true
+  echo ""
+  echo "[!] If you still see MEMLOCK/operation not permitted:"
+  echo "    Try: sudo bash -c 'ulimit -l unlimited; ulimit -a'"
+  echo "    And ensure you're not in a restricted container."
+  exit 1
+fi
+
+echo "[*]   netmon pid: $NETMON_PID"
+echo "[*] netmon running confirmed"
+
+echo "[*] [4/5] Replay PCAP (tcpreplay)"
+if ! command -v tcpreplay >/dev/null 2>&1; then
+  echo "[x] tcpreplay not installed"
+  exit 1
+fi
+
+TCPREPLAY_LOG="$RUN_DIR/tcpreplay.log"
+echo "  [*] tcpreplay args: --intf1 $REPLAY_IFACE --mbps $MBPS --stats=1"
+echo "  [*] tcpreplay log -> $TCPREPLAY_LOG"
+
+sudo tcpreplay --intf1 "$REPLAY_IFACE" --mbps "$MBPS" --stats=1 "$PCAP_PATH" >"$TCPREPLAY_LOG" 2>&1 || {
+  echo "[x] tcpreplay failed. Last 80 lines:"
+  tail -n 80 "$TCPREPLAY_LOG" || true
+  exit 1
+}
+
+echo "[*] [5/5] Waiting $((FLUSH_SECS + 2))s to allow netmon to flush..."
+sleep "$((FLUSH_SECS + 2))"
 
 echo "[*] Stop netmon (final flush + meta)"
-if [[ -n "${EBPF_PID:-}" ]]; then
-  stop_netmon "$EBPF_PID" || true
-  unset EBPF_PID
+if sudo kill -0 "$NETMON_PID" 2>/dev/null; then
+  sudo kill -INT "$NETMON_PID" 2>/dev/null || true
+  for _ in {1..40}; do
+    if ! sudo kill -0 "$NETMON_PID" 2>/dev/null; then break; fi
+    sleep 0.25
+  done
 fi
 
-echo "[5/5] Build datasets"
-python3 "$ROOT_DIR/ubuntu/make_zeek_only.py" \
-  --in_csv  "$ZEEK_DIR/conn.csv" \
-  --out_csv "$DATASETS_DIR/zeek_only.csv"
-
-if [[ -s "$EBPF_OUT" ]]; then
-  python3 "$ROOT_DIR/ubuntu/merge_zeek_ebpf.py" \
-    --zeek_conn "$ZEEK_DIR/conn.csv" \
-    --ebpf_agg  "$EBPF_OUT" \
-    --out       "$DATASETS_DIR/zeek_ebpf.csv" \
-    --run_meta  "$RUN_META"
-else
-  echo "[!] No eBPF output found at $EBPF_OUT; skipping enriched dataset." >&2
-fi
-
-echo "[*] Outputs:"
-echo "  RUN=$OUTDIR"
-echo "  Zeek conn:    $ZEEK_DIR/conn.csv"
-echo "  eBPF agg:     $EBPF_OUT"
-echo "  eBPF events:  $EBPF_EVENTS"
-echo "  netmon log:   $NETMON_LOG"
-echo "  tcpreplay:    $TCPREPLAY_LOG"
-echo "  tc meta:      $TCPREPLAY_META"
-echo "  run meta:     $RUN_META"
-echo "  datasets:     $DATASETS_DIR"
+echo "[*] Done."
+echo "  Run folder: $RUN_DIR"
+echo "  Outputs:"
+ls -lah "$EBPF_AGG" "$EBPF_EVENTS" "$RUN_META" "$TCPREPLAY_META" 2>/dev/null || true
