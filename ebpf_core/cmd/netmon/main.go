@@ -314,6 +314,21 @@ func main() {
 	var eventsRead uint64
 	var flowsFlushed uint64
 
+	// Periodic progress logs
+	progress := time.NewTicker(2 * time.Second)
+	defer progress.Stop()
+
+	go func() {
+		for range progress.C {
+			mu.Lock()
+			nflows := len(flows)
+			mu.Unlock()
+
+			fmt.Printf("[*] progress: events=%d active_flows=%d flushed=%d out=%s\n",
+				eventsRead, nflows, flowsFlushed, outPath)
+		}
+	}()
+
 	flows := make(map[FlowKey]*FlowAgg)
 	var mu sync.Mutex
 
