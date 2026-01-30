@@ -91,6 +91,12 @@ static __always_inline void fill_proc_current(struct event *e) {
   bpf_get_current_comm(&e->comm, sizeof(e->comm));
 }
 
+static __always_inline void fill_proc_sock_packet(struct event *e, struct __sk_buff *skb) {
+  e->pid = 0;
+  e->uid = (__u32)bpf_get_socket_uid(skb);
+  __builtin_memset(e->comm, 0, sizeof(e->comm));
+}
+
 static __always_inline int fill_flow_from_sock(struct sock *sk, struct event *e, struct flow_key *k) {
   __u16 family = BPF_CORE_READ(sk, __sk_common.skc_family);
   if (family != AF_INET) return 0;
@@ -176,7 +182,7 @@ int sock_packet(struct __sk_buff *skb) {
   if (eth.h_proto != bpf_htons(ETH_P_IP))
     return 0;
 
-  // IPv4 header
+  // IPv4 header (base)
   struct iphdr iph = {};
   int off = (int)sizeof(eth);
   if (bpf_skb_load_bytes(skb, off, &iph, sizeof(iph)) < 0)
@@ -193,9 +199,10 @@ int sock_packet(struct __sk_buff *skb) {
   if (proto != IPPROTO_TCP && proto != IPPROTO_UDP)
     return 0;
 
-  __u16 sport = 0, dport = 0;
+  // L4 header offset
   int l4off = off + (int)ihl;
 
+  __u16 sport = 0, dport = 0;
   if (proto == IPPROTO_TCP) {
     struct tcphdr th = {};
     if (bpf_skb_load_bytes(skb, l4off, &th, sizeof(th)) < 0)
@@ -213,9 +220,11 @@ int sock_packet(struct __sk_buff *skb) {
   struct event e = {};
   struct flow_key k = {};
 
+  // Use a monotonic clock
   e.ts_ns = bpf_ktime_get_ns();
-  // In softirq context we may not have meaningful pid/comm; keep it best-effort.
-  fill_proc_current(&e);
+
+  // IMPORTANT: socket_filter cannot use bpf_get_current_pid_tgid on current kernel.
+  fill_proc_sock_packet(&e, skb);
 
   e.saddr = iph.saddr; // __be32
   e.daddr = iph.daddr; // __be32
@@ -223,13 +232,11 @@ int sock_packet(struct __sk_buff *skb) {
   e.dport = dport;
   e.proto = proto;
 
-  // 5 = packet
+  // Packet-based accounting event
   e.evtype = 5;
   e.bytes = (__u64)skb->len;
   e.retransmits = 0;
-  e.state_old = skb->pkt_type; // reuse field
-  e.state_new = 0;
-  e.state_old = skb->pkt_type;
+  e.state_old = skb->pkt_type; // reuse for direction
   e.state_new = 0;
 
   k.saddr = iph.saddr;
