@@ -17,6 +17,7 @@ EBPF_OUT="$OUTDIR/ebpf_agg.jsonl"
 EBPF_EVENTS="$OUTDIR/ebpf_events.jsonl"
 
 NETMON_LOG="$OUTDIR/netmon.log"
+NETMON_PIDFILE="$OUTDIR/netmon.pid"
 TCPREPLAY_LOG="$OUTDIR/tcpreplay.log"
 TCPREPLAY_META="$OUTDIR/tcpreplay_meta.json"
 RUN_META="$OUTDIR/run_meta.json"
@@ -113,20 +114,25 @@ make
 popd >/dev/null
 
 echo "[3/5] Start eBPF collector (netmon)"
-# tee netmon output to file so you see it live AND keep it
-set +e
-sudo "$ROOT_DIR/ebpf_core/netmon" \
-  -obj "$ROOT_DIR/ebpf_core/netmon.bpf.o" \
-  -out "$EBPF_OUT" \
-  -events "$EBPF_EVENTS" \
-  -flush 2 \
-  -mode flow \
-  -pkt_iface "$RESOLVED_IFACE" \
-  -disable_kprobes \
-  -meta "$RUN_META" \
-  -tcpreplay_meta "$TCPREPLAY_META" 2>&1 | tee "$NETMON_LOG" &
-EBPF_PID=$!
-set -e
+
+# Launch netmon as root, but write the *actual* netmon PID to a pidfile we control.
+sudo bash -c "
+  set -e
+  \"$ROOT_DIR/ebpf_core/netmon\" \
+    -obj \"$ROOT_DIR/ebpf_core/netmon.bpf.o\" \
+    -out \"$EBPF_OUT\" \
+    -events \"$EBPF_EVENTS\" \
+    -flush 5 \
+    -mode flow \
+    -pkt_iface \"$RESOLVED_IFACE\" \
+    -disable_kprobes \
+    -meta \"$RUN_META\" \
+    -tcpreplay_meta \"$TCPREPLAY_META\" \
+    >\"$NETMON_LOG\" 2>&1 &
+  echo \$! > \"$NETMON_PIDFILE\"
+"
+
+EBPF_PID="$(cat "$NETMON_PIDFILE")"
 echo "  netmon pid: $EBPF_PID"
 sleep 2
 
@@ -154,7 +160,7 @@ if echo "$HELP" | grep -q -- '--stats'; then
 fi
 
 # Show version & chosen args
-echo "  [*] tcpreplay version: $(tcpreplay -V 2>/dev/null | head -n 1 || true)"
+echo "  [*] tcpreplay version: $(tcpreplay -V 2>&1 | head -n 1 || true)"
 echo "  [*] tcpreplay args: ${TCP_ARGS[*]}"
 
 set +e
