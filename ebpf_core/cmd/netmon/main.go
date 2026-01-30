@@ -45,7 +45,7 @@ type Event struct {
 	Bytes       uint64
 	Retransmits uint32
 
-	Comm [16]byte
+	Comm   [16]byte
 	PadEnd uint32 // explicit tail pad (matches C struct)
 }
 
@@ -174,7 +174,7 @@ func openAndBindAFPacket(iface string) (int, error) {
 		_ = unix.Close(fd)
 		return -1, err
 	}
-
+	
 	return fd, nil
 }
 
@@ -236,7 +236,7 @@ func main() {
 		panic("ringbuf map 'rb' not found")
 	}
 
-	// Attach programs
+	// Attach kprobes/tracepoints
 	var links []link.Link
 	defer func() {
 		for _, l := range links {
@@ -244,8 +244,8 @@ func main() {
 		}
 	}()
 
-	// Optional packet capture (socket filter) - required for tcpreplay visibility.
-	var pktFd int = -1
+	// Optional packet capture socket filter for tcpreplay visibility.
+	pktFd := -1
 	if pktIface != "" {
 		prog := coll.Programs["sock_packet"]
 		if prog == nil {
@@ -284,6 +284,25 @@ func main() {
 	rd, err := ringbuf.NewReader(rbMap)
 	must(err)
 	defer rd.Close()
+
+	// Close rd to unblock rd.Read() ---
+	stopCh := make(chan os.Signal, 2)
+	signal.Notify(stopCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(stopCh)
+
+	stopping := make(chan struct{})
+	var stopOnce sync.Once
+	stop := func() {
+		stopOnce.Do(func() {
+			close(stopping)
+			_ = rd.Close() // unblocks rd.Read()
+		})
+	}
+
+	go func() {
+		<-stopCh
+		stop()
+	}()
 
 	// Monotonic → epoch base
 	var ts unix.Timespec
@@ -329,103 +348,87 @@ func main() {
 		flows = make(map[FlowKey]*FlowAgg)
 	}
 
+	// periodic flush, stops when stopping closes
 	ticker := time.NewTicker(time.Duration(flushSec) * time.Second)
 	defer ticker.Stop()
-
-	stopCh := make(chan os.Signal, 2)
-	signal.Notify(stopCh, os.Interrupt, syscall.SIGTERM)
-
-	fmt.Println("[*] eBPF collector running (Ctrl+C to stop)")
-
 	go func() {
-		for range ticker.C {
-			if mode == "flow" || mode == "both" {
-				flush()
+		for {
+			select {
+			case <-stopping:
+				return
+			case <-ticker.C:
+				if mode == "flow" || mode == "both" {
+					flush()
+				}
 			}
 		}
 	}()
 
+	fmt.Println("[*] eBPF collector running (Ctrl+C to stop)")
+
 	for {
-		select {
-		case <-stopCh:
-			fmt.Println("[*] stopping, final flush...")
-			if mode == "flow" || mode == "both" {
-				flush()
+		rec, err := rd.Read()
+		if err != nil {
+			if err == ringbuf.ErrClosed {
+				break
 			}
-			// Optional run metadata summary (useful for integrating tcpreplay results).
-			finalMeta := metaPath
-			if finalMeta == "" {
-				finalMeta = outPath + ".meta.json"
-			}
-			summary := map[string]any{
-				"start_rfc3339":   startTime.UTC().Format(time.RFC3339),
-				"end_rfc3339":     time.Now().UTC().Format(time.RFC3339),
-				"duration_s":      time.Since(startTime).Seconds(),
-				"obj":             objPath,
-				"out":             outPath,
-				"events":          eventsPath,
-				"flush_s":         flushSec,
-				"mode":            mode,
-				"pkt_iface":       pktIface,
-				"disable_kprobes": disableKprobes,
-				"events_read":     eventsRead,
-				"flows_flushed":   flowsFlushed,
-			}
-			if tcpreplayMetaPath != "" {
-				if m, err := readJSONFile(tcpreplayMetaPath); err == nil {
-					summary["tcpreplay"] = m
-				} else {
-					summary["tcpreplay_error"] = err.Error()
-				}
-			}
-			if err := os.MkdirAll(filepath.Dir(finalMeta), 0o755); err == nil {
-				if b, err := json.MarshalIndent(summary, "", "  "); err == nil {
-					_ = os.WriteFile(finalMeta, b, 0o644)
-					fmt.Println("[*] wrote run meta:", finalMeta)
-				}
-			}
+			continue
+		}
 
-			// If pktFd was set but we didn't hit defers (shouldn't happen), clean it.
-			if pktFd != -1 {
-				_ = detachSocketFilter(pktFd)
-				_ = unix.Close(pktFd)
+		want := binary.Size(Event{})
+		if len(rec.RawSample) < want {
+			// Skip malformed / short samples instead of panicking
+			continue
+		}
+
+		var e Event
+		must(binary.Read(bytes.NewBuffer(rec.RawSample[:want]), binary.LittleEndian, &e))
+		eventsRead++
+
+		// Normalize addresses: BPF emits __be32; on little-endian hosts we must ntohl.
+		saddrU32 := ntohl(e.Saddr)
+		daddrU32 := ntohl(e.Daddr)
+		saddrStr := u32ToIPv4StrBE(saddrU32)
+		daddrStr := u32ToIPv4StrBE(daddrU32)
+		commStr := cstr(e.Comm[:])
+		evEpoch := monoToEpochSec(e.TsNs, baseEpoch, baseMonoNs)
+
+		if (mode == "event" || mode == "both") && evW != nil {
+			out := RawEventOut{
+				TsMonoNs:    e.TsNs,
+				TsEpochS:    evEpoch,
+				Pid:         e.Pid,
+				Uid:         e.Uid,
+				Comm:        commStr,
+				Saddr:       saddrU32,
+				Daddr:       daddrU32,
+				Sport:       e.Sport,
+				Dport:       e.Dport,
+				Proto:       e.Proto,
+				SaddrStr:    saddrStr,
+				DaddrStr:    daddrStr,
+				Evtype:      e.Evtype,
+				StateOld:    e.StateOld,
+				StateNew:    e.StateNew,
+				Bytes:       e.Bytes,
+				Retransmits: e.Retransmits,
 			}
-			return
+			b, _ := json.Marshal(out)
+			_, _ = evW.Write(b)
+			_ = evW.WriteByte('\n')
+		}
 
-		default:
-			rec, err := rd.Read()
-			if err != nil {
-				if err == ringbuf.ErrClosed {
-					return
-				}
-				continue
-			}
+		if mode == "flow" || mode == "both" {
+			k := FlowKey{Saddr: saddrU32, Daddr: daddrU32, Sport: e.Sport, Dport: e.Dport, Proto: e.Proto}
 
-			want := binary.Size(Event{})
-			if len(rec.RawSample) < want {
-				// Skip malformed / short samples instead of panicking
-				continue
-			}
-
-			var e Event
-			must(binary.Read(bytes.NewBuffer(rec.RawSample[:want]), binary.LittleEndian, &e))
-			eventsRead++
-
-			// Normalize addresses: BPF emits __be32; on little-endian hosts we must ntohl.
-			saddrU32 := ntohl(e.Saddr)
-			daddrU32 := ntohl(e.Daddr)
-			saddrStr := u32ToIPv4StrBE(saddrU32)
-			daddrStr := u32ToIPv4StrBE(daddrU32)
-			commStr := cstr(e.Comm[:])
-			evEpoch := monoToEpochSec(e.TsNs, baseEpoch, baseMonoNs)
-
-			if (mode == "event" || mode == "both") && evW != nil {
-				out := RawEventOut{
-					TsMonoNs:    e.TsNs,
-					TsEpochS:    evEpoch,
-					Pid:         e.Pid,
-					Uid:         e.Uid,
-					Comm:        commStr,
+			mu.Lock()
+			a := flows[k]
+			if a == nil {
+				a = &FlowAgg{
+					FirstMonoNs: e.TsNs,
+					LastMonoNs:  e.TsNs,
+					FirstEpochS: evEpoch,
+					LastEpochS:  evEpoch,
 					Saddr:       saddrU32,
 					Daddr:       daddrU32,
 					Sport:       e.Sport,
@@ -433,76 +436,88 @@ func main() {
 					Proto:       e.Proto,
 					SaddrStr:    saddrStr,
 					DaddrStr:    daddrStr,
-					Evtype:      e.Evtype,
-					StateOld:    e.StateOld,
-					StateNew:    e.StateNew,
-					Bytes:       e.Bytes,
-					Retransmits: e.Retransmits,
+					PidMode:     e.Pid,
+					UidMode:     e.Uid,
+					CommMode:    commStr,
 				}
-				b, _ := json.Marshal(out)
-				_, _ = evW.Write(b)
-				_ = evW.WriteByte('\n')
-				_ = evW.Flush()
+				flows[k] = a
 			}
 
-			if mode == "flow" || mode == "both" {
-				k := FlowKey{
-					Saddr: saddrU32, Daddr: daddrU32,
-					Sport: e.Sport, Dport: e.Dport,
-					Proto: e.Proto,
-				}
+			a.LastMonoNs = e.TsNs
+			a.LastEpochS = evEpoch
+			a.Samples++
 
-				mu.Lock()
-				a := flows[k]
-				if a == nil {
-					a = &FlowAgg{
-						FirstMonoNs: e.TsNs,
-						LastMonoNs:  e.TsNs,
-						FirstEpochS: evEpoch,
-						LastEpochS:  evEpoch,
-						Saddr:       saddrU32,
-						Daddr:       daddrU32,
-						Sport:       e.Sport,
-						Dport:       e.Dport,
-						Proto:       e.Proto,
-						SaddrStr:    saddrStr,
-						DaddrStr:    daddrStr,
-						PidMode:     e.Pid,
-						UidMode:     e.Uid,
-						CommMode:    commStr,
-					}
-					flows[k] = a
-				}
+			// last-seen process (simple mode)
+			a.PidMode = e.Pid
+			a.UidMode = e.Uid
+			a.CommMode = commStr
 
-				a.LastMonoNs = e.TsNs
-				a.LastEpochS = evEpoch
-				a.Samples++
-
-				// last-seen process (simple mode)
-				a.PidMode = e.Pid
-				a.UidMode = e.Uid
-				a.CommMode = commStr
-
-				switch e.Evtype {
-				case 1:
-					a.StateChanges++
-				case 2:
+			switch e.Evtype {
+			case 1:
+				a.StateChanges++
+			case 2:
+				a.BytesSent += e.Bytes
+			case 3:
+				a.BytesRecv += e.Bytes
+			case 4:
+				a.Retransmits += e.Retransmits
+			case 5:
+				if e.StateOld == packetOutgoing {
 					a.BytesSent += e.Bytes
-				case 3:
+				} else {
 					a.BytesRecv += e.Bytes
-				case 4:
-					a.Retransmits += e.Retransmits
-				case 5:
-					// Packet events: state_old carries skb->pkt_type.
-					if e.StateOld == packetOutgoing {
-						a.BytesSent += e.Bytes
-					} else {
-						a.BytesRecv += e.Bytes
-					}
 				}
-
-				mu.Unlock()
 			}
+			mu.Unlock()
 		}
 	}
+
+	// Final flush + meta write (always runs after loop exits)
+	fmt.Println("[*] stopping, final flush...")
+
+	if mode == "flow" || mode == "both" {
+		flush()
+	}
+	_ = outW.Flush()
+	if evW != nil {
+		_ = evW.Flush()
+	}
+
+	finalMeta := metaPath
+	if finalMeta == "" {
+		finalMeta = outPath + ".meta.json"
+	}
+
+	summary := map[string]any{
+		"start_rfc3339":   startTime.UTC().Format(time.RFC3339),
+		"end_rfc3339":     time.Now().UTC().Format(time.RFC3339),
+		"duration_s":      time.Since(startTime).Seconds(),
+		"obj":             objPath,
+		"out":             outPath,
+		"events":          eventsPath,
+		"flush_s":         flushSec,
+		"mode":            mode,
+		"pkt_iface":       pktIface,
+		"disable_kprobes": disableKprobes,
+		"events_read":     eventsRead,
+		"flows_flushed":   flowsFlushed,
+	}
+
+	if tcpreplayMetaPath != "" {
+		if m, err := readJSONFile(tcpreplayMetaPath); err == nil {
+			summary["tcpreplay"] = m
+		} else {
+			summary["tcpreplay_error"] = err.Error()
+		}
+	}
+
+	if err := os.MkdirAll(filepath.Dir(finalMeta), 0o755); err == nil {
+		if b, err := json.MarshalIndent(summary, "", "  "); err == nil {
+			_ = os.WriteFile(finalMeta, b, 0o644)
+			fmt.Println("[*] wrote run meta:", finalMeta)
+		}
+	}
+
+	// pktFd is handled by defer, but keep a safety close if you ever refactor defers.
+	_ = pktFd
 }
