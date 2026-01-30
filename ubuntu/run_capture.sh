@@ -160,7 +160,7 @@ if echo "$HELP" | grep -q -- '--stats'; then
 fi
 
 # Show version & chosen args
-echo "  [*] tcpreplay version: $(tcpreplay -V 2>&1 | head -n 1 || true)"
+echo "  [*] tcpreplay version: $(tcpreplay -V 2>&1 | grep -m1 -E 'tcpreplay \(|^tcpreplay ' || tcpreplay -V 2>&1 | tail -n 1)"
 echo "  [*] tcpreplay args: ${TCP_ARGS[*]}"
 
 set +e
