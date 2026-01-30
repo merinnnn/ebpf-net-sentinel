@@ -145,35 +145,47 @@ func must(err error) {
 	}
 }
 
-const ethPAll = 0x0003 // ETH_P_ALL
+const (
+	ethPAll        uint16 = 0x0003 // ETH_P_ALL
+	packetOutgoing uint32 = 4      // PACKET_OUTGOING (matches BPF constant)
+)
 
 func htons(v uint16) uint16 {
 	return (v<<8)&0xff00 | (v>>8)&0x00ff
 }
 
-// openPacketSocket opens an AF_PACKET socket bound to the given interface.
-// This is used with the eBPF socket filter program so tcpreplay traffic is visible.
-func openPacketSocketFile(iface string) (*os.File, error) {
+// Open AF_PACKET socket bound to iface, for attaching socket filter (SO_ATTACH_BPF).
+func openAndBindAFPacket(iface string) (int, error) {
 	ifc, err := net.InterfaceByName(iface)
 	if err != nil {
-		return nil, err
+		return -1, err
 	}
 
 	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, int(htons(ethPAll)))
 	if err != nil {
-		return nil, err
+		return -1, err
 	}
 
-	// bind to interface
-	sa := &unix.SockaddrLinklayer{Protocol: htons(ethPAll), Ifindex: ifc.Index}
+	sa := &unix.SockaddrLinklayer{
+		Protocol: htons(ethPAll),
+		Ifindex:  ifc.Index,
+	}
 	if err := unix.Bind(fd, sa); err != nil {
 		_ = unix.Close(fd)
-		return nil, err
+		return -1, err
 	}
 
-	return os.NewFile(uintptr(fd), "afpacket:"+iface), nil
+	return fd, nil
 }
 
+func attachSocketFilter(fd int, prog *ebpf.Program) error {
+	return unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_ATTACH_BPF, prog.FD())
+}
+
+func detachSocketFilter(fd int) error {
+	// SO_DETACH_BPF ignores optval; use 0.
+	return unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_DETACH_BPF, 0)
+}
 
 func readJSONFile(path string) (map[string]any, error) {
 	b, err := os.ReadFile(path)
@@ -233,29 +245,21 @@ func main() {
 	}()
 
 	// Optional packet capture (socket filter) - required for tcpreplay visibility.
+	var pktFd int = -1
 	if pktIface != "" {
 		prog := coll.Programs["sock_packet"]
 		if prog == nil {
 			panic("program 'sock_packet' not found in collection")
 		}
 
-		f, err := openPacketSocketFile(pktIface)
+		fd, err := openAndBindAFPacket(pktIface)
 		must(err)
+		pktFd = fd
 
-		pc, err := net.FilePacketConn(f)
-		must(err)
-		_ = f.Close() // FilePacketConn dup's the FD
-
-		sc, ok := pc.(syscall.Conn)
-		if !ok {
-			_ = pc.Close()
-			panic("packet conn does not implement syscall.Conn")
-		}
-
-		must(link.AttachSocketFilter(sc, prog)) // setsockopt(SO_ATTACH_BPF)
+		must(attachSocketFilter(pktFd, prog))
 		defer func() {
-			_ = link.DetachSocketFilter(sc)
-			_ = pc.Close()
+			_ = detachSocketFilter(pktFd)
+			_ = unix.Close(pktFd)
 		}()
 	}
 
@@ -286,6 +290,7 @@ func main() {
 	must(unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts))
 	baseMonoNs := uint64(ts.Sec)*1e9 + uint64(ts.Nsec)
 	baseEpoch := time.Now()
+
 	startTime := time.Now()
 	var eventsRead uint64
 	var flowsFlushed uint64
@@ -316,10 +321,10 @@ func main() {
 		for _, a := range flows {
 			a.FlushEpochS = nowEpoch
 			b, _ := json.Marshal(a)
-			outW.Write(b)
-			outW.WriteByte('\n')
+			_, _ = outW.Write(b)
+			_ = outW.WriteByte('\n')
 		}
-		outW.Flush()
+		_ = outW.Flush()
 		flowsFlushed += uint64(len(flows))
 		flows = make(map[FlowKey]*FlowAgg)
 	}
@@ -353,18 +358,18 @@ func main() {
 				finalMeta = outPath + ".meta.json"
 			}
 			summary := map[string]any{
-				"start_rfc3339": startTime.UTC().Format(time.RFC3339),
-				"end_rfc3339":   time.Now().UTC().Format(time.RFC3339),
-				"duration_s":    time.Since(startTime).Seconds(),
-				"obj":           objPath,
-				"out":           outPath,
-				"events":        eventsPath,
-				"flush_s":       flushSec,
-				"mode":          mode,
-				"pkt_iface":     pktIface,
+				"start_rfc3339":   startTime.UTC().Format(time.RFC3339),
+				"end_rfc3339":     time.Now().UTC().Format(time.RFC3339),
+				"duration_s":      time.Since(startTime).Seconds(),
+				"obj":             objPath,
+				"out":             outPath,
+				"events":          eventsPath,
+				"flush_s":         flushSec,
+				"mode":            mode,
+				"pkt_iface":       pktIface,
 				"disable_kprobes": disableKprobes,
-				"events_read":   eventsRead,
-				"flows_flushed": flowsFlushed,
+				"events_read":     eventsRead,
+				"flows_flushed":   flowsFlushed,
 			}
 			if tcpreplayMetaPath != "" {
 				if m, err := readJSONFile(tcpreplayMetaPath); err == nil {
@@ -378,6 +383,12 @@ func main() {
 					_ = os.WriteFile(finalMeta, b, 0o644)
 					fmt.Println("[*] wrote run meta:", finalMeta)
 				}
+			}
+
+			// If pktFd was set but we didn't hit defers (shouldn't happen), clean it.
+			if pktFd != -1 {
+				_ = detachSocketFilter(pktFd)
+				_ = unix.Close(pktFd)
 			}
 			return
 
@@ -410,32 +421,36 @@ func main() {
 
 			if (mode == "event" || mode == "both") && evW != nil {
 				out := RawEventOut{
-					TsMonoNs:   e.TsNs,
-					TsEpochS:   evEpoch,
-					Pid:        e.Pid,
-					Uid:        e.Uid,
-					Comm:       commStr,
-					Saddr:      saddrU32,
-					Daddr:      daddrU32,
-					Sport:      e.Sport,
-					Dport:      e.Dport,
-					Proto:      e.Proto,
-					SaddrStr:   saddrStr,
-					DaddrStr:   daddrStr,
-					Evtype:     e.Evtype,
-					StateOld:   e.StateOld,
-					StateNew:   e.StateNew,
-					Bytes:      e.Bytes,
+					TsMonoNs:    e.TsNs,
+					TsEpochS:    evEpoch,
+					Pid:         e.Pid,
+					Uid:         e.Uid,
+					Comm:        commStr,
+					Saddr:       saddrU32,
+					Daddr:       daddrU32,
+					Sport:       e.Sport,
+					Dport:       e.Dport,
+					Proto:       e.Proto,
+					SaddrStr:    saddrStr,
+					DaddrStr:    daddrStr,
+					Evtype:      e.Evtype,
+					StateOld:    e.StateOld,
+					StateNew:    e.StateNew,
+					Bytes:       e.Bytes,
 					Retransmits: e.Retransmits,
 				}
 				b, _ := json.Marshal(out)
-				evW.Write(b)
-				evW.WriteByte('\n')
-				evW.Flush()
+				_, _ = evW.Write(b)
+				_ = evW.WriteByte('\n')
+				_ = evW.Flush()
 			}
 
 			if mode == "flow" || mode == "both" {
-				k := FlowKey{Saddr: saddrU32, Daddr: daddrU32, Sport: e.Sport, Dport: e.Dport, Proto: e.Proto}
+				k := FlowKey{
+					Saddr: saddrU32, Daddr: daddrU32,
+					Sport: e.Sport, Dport: e.Dport,
+					Proto: e.Proto,
+				}
 
 				mu.Lock()
 				a := flows[k]
@@ -468,7 +483,7 @@ func main() {
 				a.UidMode = e.Uid
 				a.CommMode = commStr
 
-					switch e.Evtype {
+				switch e.Evtype {
 				case 1:
 					a.StateChanges++
 				case 2:
@@ -477,13 +492,13 @@ func main() {
 					a.BytesRecv += e.Bytes
 				case 4:
 					a.Retransmits += e.Retransmits
-					case 5:
-						// Packet events: state_old carries skb->pkt_type.
-						if e.StateOld == 4 {
-							a.BytesSent += e.Bytes
-						} else {
-							a.BytesRecv += e.Bytes
-						}
+				case 5:
+					// Packet events: state_old carries skb->pkt_type.
+					if e.StateOld == packetOutgoing {
+						a.BytesSent += e.Bytes
+					} else {
+						a.BytesRecv += e.Bytes
+					}
 				}
 
 				mu.Unlock()
