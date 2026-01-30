@@ -4,7 +4,7 @@ set -euo pipefail
 # Build Zeek-only and Zeek+eBPF datasets (optionally labeled) from a captured run directory.
 #
 # Example:
-#   bash ubuntu/build_datasets.sh data/enriched_run/20260128_123456 --scenario FRI_DDOS --tz_offset_hours 0
+#   bash ubuntu/build_datasets.sh data/runs/2026-01-30_152438 --scenario FRI_DDOS --tz_offset_hours 0
 #
 # Inputs expected in <run_dir>:
 #   zeek/conn.csv
