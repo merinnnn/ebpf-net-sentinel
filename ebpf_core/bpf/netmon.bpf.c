@@ -13,6 +13,18 @@
 #define IPPROTO_TCP 6
 #endif
 
+#ifndef ETH_P_IP
+#define ETH_P_IP 0x0800
+#endif
+
+#ifndef IPPROTO_UDP
+#define IPPROTO_UDP 17
+#endif
+
+#ifndef PACKET_OUTGOING
+#define PACKET_OUTGOING 4
+#endif
+
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
 struct event {
@@ -34,6 +46,9 @@ struct event {
   __u64 bytes;
   __u32 retransmits;
   char  comm[16];
+
+  // Explicit tail padding so user-space struct layout is deterministic.
+  __u32 pad_end;
 };
 
 struct flow_key {
@@ -131,6 +146,13 @@ static __always_inline void update_flow(struct flow_key *k, struct event *e) {
     v->bytes_recv += e->bytes;
   } else if (e->evtype == 4) {
     v->retransmits += e->retransmits;
+  } else if (e->evtype == 5) {
+    // Packet-based accounting: we stash skb->pkt_type in state_old.
+    // PACKET_OUTGOING means egress; otherwise treat as ingress.
+    if (e->state_old == PACKET_OUTGOING)
+      v->bytes_sent += e->bytes;
+    else
+      v->bytes_recv += e->bytes;
   }
 }
 
@@ -139,6 +161,87 @@ static __always_inline void emit_event(struct event *e) {
   if (!out) return;
   __builtin_memcpy(out, e, sizeof(*out));
   bpf_ringbuf_submit(out, 0);
+}
+
+// tcpreplay injects frames at L2 and does NOT exercise the TCP socket stack,
+// so kprobes/tracepoints like tcp_sendmsg won't fire. A socket filter lets us
+// observe replayed traffic and aggregate by 5-tuple.
+SEC("socket")
+int sock_packet(struct __sk_buff *skb) {
+  // Ethernet header
+  struct ethhdr eth = {};
+  if (bpf_skb_load_bytes(skb, 0, &eth, sizeof(eth)) < 0)
+    return 0;
+
+  if (eth.h_proto != bpf_htons(ETH_P_IP))
+    return 0;
+
+  // IPv4 header
+  struct iphdr iph = {};
+  int off = (int)sizeof(eth);
+  if (bpf_skb_load_bytes(skb, off, &iph, sizeof(iph)) < 0)
+    return 0;
+
+  if (iph.version != 4)
+    return 0;
+
+  __u32 ihl = (__u32)iph.ihl * 4;
+  if (ihl < sizeof(struct iphdr))
+    return 0;
+
+  __u8 proto = iph.protocol;
+  if (proto != IPPROTO_TCP && proto != IPPROTO_UDP)
+    return 0;
+
+  __u16 sport = 0, dport = 0;
+  int l4off = off + (int)ihl;
+
+  if (proto == IPPROTO_TCP) {
+    struct tcphdr th = {};
+    if (bpf_skb_load_bytes(skb, l4off, &th, sizeof(th)) < 0)
+      return 0;
+    sport = bpf_ntohs(th.source);
+    dport = bpf_ntohs(th.dest);
+  } else {
+    struct udphdr uh = {};
+    if (bpf_skb_load_bytes(skb, l4off, &uh, sizeof(uh)) < 0)
+      return 0;
+    sport = bpf_ntohs(uh.source);
+    dport = bpf_ntohs(uh.dest);
+  }
+
+  struct event e = {};
+  struct flow_key k = {};
+
+  e.ts_ns = bpf_ktime_get_ns();
+  // In softirq context we may not have meaningful pid/comm; keep it best-effort.
+  fill_proc_current(&e);
+
+  e.saddr = iph.saddr; // __be32
+  e.daddr = iph.daddr; // __be32
+  e.sport = sport;
+  e.dport = dport;
+  e.proto = proto;
+
+  // 5 = packet
+  e.evtype = 5;
+  e.bytes = (__u64)skb->len;
+  e.retransmits = 0;
+  e.state_old = skb->pkt_type; // reuse field
+  e.state_new = 0;
+  e.state_old = skb->pkt_type;
+  e.state_new = 0;
+
+  k.saddr = iph.saddr;
+  k.daddr = iph.daddr;
+  k.sport = sport;
+  k.dport = dport;
+  k.proto = proto;
+
+  update_flow(&k, &e);
+  emit_event(&e);
+
+  return 0;
 }
 
 SEC("tracepoint/sock/inet_sock_set_state")
