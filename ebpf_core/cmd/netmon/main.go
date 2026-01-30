@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -174,7 +175,7 @@ func openAndBindAFPacket(iface string) (int, error) {
 		_ = unix.Close(fd)
 		return -1, err
 	}
-	
+
 	return fd, nil
 }
 
@@ -285,7 +286,7 @@ func main() {
 	must(err)
 	defer rd.Close()
 
-	// Close rd to unblock rd.Read() ---
+	// Close rd to unblock rd.Read()
 	stopCh := make(chan os.Signal, 2)
 	signal.Notify(stopCh, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(stopCh)
@@ -298,7 +299,6 @@ func main() {
 			_ = rd.Close() // unblocks rd.Read()
 		})
 	}
-
 	go func() {
 		<-stopCh
 		stop()
@@ -311,26 +311,12 @@ func main() {
 	baseEpoch := time.Now()
 
 	startTime := time.Now()
-	var eventsRead uint64
-	var flowsFlushed uint64
-
-	// Periodic progress logs
-	progress := time.NewTicker(2 * time.Second)
-	defer progress.Stop()
-
-	go func() {
-		for range progress.C {
-			mu.Lock()
-			nflows := len(flows)
-			mu.Unlock()
-
-			fmt.Printf("[*] progress: events=%d active_flows=%d flushed=%d out=%s\n",
-				eventsRead, nflows, flowsFlushed, outPath)
-		}
-	}()
 
 	flows := make(map[FlowKey]*FlowAgg)
 	var mu sync.Mutex
+
+	var eventsRead uint64
+	var flowsFlushed uint64
 
 	outFile, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	must(err)
@@ -359,7 +345,8 @@ func main() {
 			_ = outW.WriteByte('\n')
 		}
 		_ = outW.Flush()
-		flowsFlushed += uint64(len(flows))
+
+		atomic.AddUint64(&flowsFlushed, uint64(len(flows)))
 		flows = make(map[FlowKey]*FlowAgg)
 	}
 
@@ -379,8 +366,32 @@ func main() {
 		}
 	}()
 
-	fmt.Println("[*] eBPF collector running (Ctrl+C to stop)")
+	// Periodic progress logs (stop on stopping)
+	progress := time.NewTicker(2 * time.Second)
+	defer progress.Stop()
+	go func() {
+		for {
+			select {
+			case <-stopping:
+				return
+			case <-progress.C:
+				mu.Lock()
+				nflows := len(flows)
+				mu.Unlock()
+				fmt.Printf("[*] progress: events=%d active_flows=%d flushed=%d out=%s\n",
+					atomic.LoadUint64(&eventsRead),
+					nflows,
+					atomic.LoadUint64(&flowsFlushed),
+					outPath,
+				)
+			}
+		}
+	}()
 
+	fmt.Printf("[*] eBPF collector running (mode=%s flush=%ds pkt_iface=%q disable_kprobes=%v)\n",
+		mode, flushSec, pktIface, disableKprobes)
+
+	// Read loop; exits when rd is closed (SIGINT/SIGTERM or normal teardown)
 	for {
 		rec, err := rd.Read()
 		if err != nil {
@@ -398,7 +409,7 @@ func main() {
 
 		var e Event
 		must(binary.Read(bytes.NewBuffer(rec.RawSample[:want]), binary.LittleEndian, &e))
-		eventsRead++
+		atomic.AddUint64(&eventsRead, 1)
 
 		// Normalize addresses: BPF emits __be32; on little-endian hosts we must ntohl.
 		saddrU32 := ntohl(e.Saddr)
@@ -434,7 +445,13 @@ func main() {
 		}
 
 		if mode == "flow" || mode == "both" {
-			k := FlowKey{Saddr: saddrU32, Daddr: daddrU32, Sport: e.Sport, Dport: e.Dport, Proto: e.Proto}
+			k := FlowKey{
+				Saddr: saddrU32,
+				Daddr: daddrU32,
+				Sport: e.Sport,
+				Dport: e.Dport,
+				Proto: e.Proto,
+			}
 
 			mu.Lock()
 			a := flows[k]
@@ -462,7 +479,7 @@ func main() {
 			a.LastEpochS = evEpoch
 			a.Samples++
 
-			// last-seen process (simple mode)
+			// last-seen process (best-effort; will be 0/65534 for pkt_iface path)
 			a.PidMode = e.Pid
 			a.UidMode = e.Uid
 			a.CommMode = commStr
@@ -477,6 +494,7 @@ func main() {
 			case 4:
 				a.Retransmits += e.Retransmits
 			case 5:
+				// Packet events: state_old carries skb->pkt_type (PACKET_OUTGOING==4).
 				if e.StateOld == packetOutgoing {
 					a.BytesSent += e.Bytes
 				} else {
@@ -487,9 +505,8 @@ func main() {
 		}
 	}
 
-	// Final flush + meta write (always runs after loop exits)
+	// Final flush + meta write
 	fmt.Println("[*] stopping, final flush...")
-
 	if mode == "flow" || mode == "both" {
 		flush()
 	}
@@ -514,8 +531,8 @@ func main() {
 		"mode":            mode,
 		"pkt_iface":       pktIface,
 		"disable_kprobes": disableKprobes,
-		"events_read":     eventsRead,
-		"flows_flushed":   flowsFlushed,
+		"events_read":     atomic.LoadUint64(&eventsRead),
+		"flows_flushed":   atomic.LoadUint64(&flowsFlushed),
 	}
 
 	if tcpreplayMetaPath != "" {
@@ -533,6 +550,6 @@ func main() {
 		}
 	}
 
-	// pktFd is handled by defer, but keep a safety close if you ever refactor defers.
+	// pktFd is handled by defer, but keep a safety reference so it’s not “unused”
 	_ = pktFd
 }
