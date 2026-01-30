@@ -153,23 +153,27 @@ func htons(v uint16) uint16 {
 
 // openPacketSocket opens an AF_PACKET socket bound to the given interface.
 // This is used with the eBPF socket filter program so tcpreplay traffic is visible.
-func openPacketSocket(iface string) (int, error) {
+func openPacketSocketFile(iface string) (*os.File, error) {
 	ifc, err := net.InterfaceByName(iface)
 	if err != nil {
-		return -1, err
+		return nil, err
 	}
+
 	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, int(htons(ethPAll)))
 	if err != nil {
-		return -1, err
+		return nil, err
 	}
+
 	// bind to interface
 	sa := &unix.SockaddrLinklayer{Protocol: htons(ethPAll), Ifindex: ifc.Index}
 	if err := unix.Bind(fd, sa); err != nil {
-		unix.Close(fd)
-		return -1, err
+		_ = unix.Close(fd)
+		return nil, err
 	}
-	return fd, nil
+
+	return os.NewFile(uintptr(fd), "afpacket:"+iface), nil
 }
+
 
 func readJSONFile(path string) (map[string]any, error) {
 	b, err := os.ReadFile(path)
@@ -229,26 +233,29 @@ func main() {
 	}()
 
 	// Optional packet capture (socket filter) - required for tcpreplay visibility.
-	var pktFd int = -1
 	if pktIface != "" {
-		fd, err := openPacketSocket(pktIface)
-		must(err)
-		pktFd = fd
 		prog := coll.Programs["sock_packet"]
 		if prog == nil {
 			panic("program 'sock_packet' not found in collection")
 		}
-		must(link.RawAttachProgram(link.RawAttachProgramOptions{
-			Target:  pktFd,
-			Program: prog,
-			Attach:  ebpf.AttachTypeSocketFilter,
-		}))
+
+		f, err := openPacketSocketFile(pktIface)
+		must(err)
+
+		pc, err := net.FilePacketConn(f)
+		must(err)
+		_ = f.Close() // FilePacketConn dup's the FD
+
+		sc, ok := pc.(syscall.Conn)
+		if !ok {
+			_ = pc.Close()
+			panic("packet conn does not implement syscall.Conn")
+		}
+
+		must(link.AttachSocketFilter(sc, prog)) // setsockopt(SO_ATTACH_BPF)
 		defer func() {
-			_ = link.RawDetachProgram(link.RawDetachProgramOptions{
-				Target: pktFd,
-				Attach: ebpf.AttachTypeSocketFilter,
-			})
-			_ = unix.Close(pktFd)
+			_ = link.DetachSocketFilter(sc)
+			_ = pc.Close()
 		}()
 	}
 
