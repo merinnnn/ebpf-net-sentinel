@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -44,9 +45,8 @@ type Event struct {
 	Bytes       uint64
 	Retransmits uint32
 
-	Pad1 uint32 // padding so Comm lands correctly / total size matches C
-
 	Comm [16]byte
+	PadEnd uint32 // explicit tail pad (matches C struct)
 }
 
 type FlowKey struct {
@@ -145,18 +145,64 @@ func must(err error) {
 	}
 }
 
+const ethPAll = 0x0003 // ETH_P_ALL
+
+func htons(v uint16) uint16 {
+	return (v<<8)&0xff00 | (v>>8)&0x00ff
+}
+
+// openPacketSocket opens an AF_PACKET socket bound to the given interface.
+// This is used with the eBPF socket filter program so tcpreplay traffic is visible.
+func openPacketSocket(iface string) (int, error) {
+	ifc, err := net.InterfaceByName(iface)
+	if err != nil {
+		return -1, err
+	}
+	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, int(htons(ethPAll)))
+	if err != nil {
+		return -1, err
+	}
+	// bind to interface
+	sa := &unix.SockaddrLinklayer{Protocol: htons(ethPAll), Ifindex: ifc.Index}
+	if err := unix.Bind(fd, sa); err != nil {
+		unix.Close(fd)
+		return -1, err
+	}
+	return fd, nil
+}
+
+func readJSONFile(path string) (map[string]any, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
 func main() {
 	var objPath string
 	var outPath string
 	var eventsPath string
 	var flushSec int
 	var mode string
+	var pktIface string
+	var disableKprobes bool
+	var metaPath string
+	var tcpreplayMetaPath string
 
 	flag.StringVar(&objPath, "obj", "netmon.bpf.o", "compiled BPF object")
 	flag.StringVar(&outPath, "out", "/tmp/ebpf_agg.jsonl", "flow aggregate JSONL output")
 	flag.StringVar(&eventsPath, "events", "", "raw event JSONL output (optional)")
 	flag.IntVar(&flushSec, "flush", 5, "flush interval seconds")
 	flag.StringVar(&mode, "mode", "flow", "one of: flow|event|both")
+	flag.StringVar(&pktIface, "pkt_iface", "", "if set, attach a socket filter to capture packets on this interface (works with tcpreplay)")
+	flag.BoolVar(&disableKprobes, "disable_kprobes", false, "skip kprobes/tracepoints (useful when using pkt_iface only)")
+	flag.StringVar(&metaPath, "meta", "", "optional JSON file to write a run summary (counts + config)")
+	flag.StringVar(&tcpreplayMetaPath, "tcpreplay_meta", "", "optional JSON file produced by run_capture.sh (embedded into run summary if present)")
 	flag.Parse()
 
 	// Avoid memlock issues
@@ -175,21 +221,54 @@ func main() {
 	}
 
 	// Attach programs
-	tp, err := link.Tracepoint("sock", "inet_sock_set_state", coll.Programs["tp_inet_sock_set_state"], nil)
-	must(err)
-	defer tp.Close()
+	var links []link.Link
+	defer func() {
+		for _, l := range links {
+			_ = l.Close()
+		}
+	}()
 
-	kpSend, err := link.Kprobe("tcp_sendmsg", coll.Programs["kp_tcp_sendmsg"], nil)
-	must(err)
-	defer kpSend.Close()
+	// Optional packet capture (socket filter) - required for tcpreplay visibility.
+	var pktFd int = -1
+	if pktIface != "" {
+		fd, err := openPacketSocket(pktIface)
+		must(err)
+		pktFd = fd
+		prog := coll.Programs["sock_packet"]
+		if prog == nil {
+			panic("program 'sock_packet' not found in collection")
+		}
+		must(link.RawAttachProgram(link.RawAttachProgramOptions{
+			Target:  pktFd,
+			Program: prog,
+			Attach:  ebpf.AttachTypeSocketFilter,
+		}))
+		defer func() {
+			_ = link.RawDetachProgram(link.RawDetachProgramOptions{
+				Target: pktFd,
+				Attach: ebpf.AttachTypeSocketFilter,
+			})
+			_ = unix.Close(pktFd)
+		}()
+	}
 
-	kpClnRbuf, err := link.Kprobe("tcp_cleanup_rbuf", coll.Programs["kp_tcp_cleanup_rbuf"], nil)
-	must(err)
-	defer kpClnRbuf.Close()
+	if !disableKprobes {
+		tp, err := link.Tracepoint("sock", "inet_sock_set_state", coll.Programs["tp_inet_sock_set_state"], nil)
+		must(err)
+		links = append(links, tp)
 
-	kpRetransmit, err := link.Kprobe("tcp_retransmit_skb", coll.Programs["kp_tcp_retransmit_skb"], nil)
-	must(err)
-	defer kpRetransmit.Close()
+		kpSend, err := link.Kprobe("tcp_sendmsg", coll.Programs["kp_tcp_sendmsg"], nil)
+		must(err)
+		links = append(links, kpSend)
+
+		kpClnRbuf, err := link.Kprobe("tcp_cleanup_rbuf", coll.Programs["kp_tcp_cleanup_rbuf"], nil)
+		must(err)
+		links = append(links, kpClnRbuf)
+
+		kpRetransmit, err := link.Kprobe("tcp_retransmit_skb", coll.Programs["kp_tcp_retransmit_skb"], nil)
+		must(err)
+		links = append(links, kpRetransmit)
+	}
 
 	rd, err := ringbuf.NewReader(rbMap)
 	must(err)
@@ -200,6 +279,9 @@ func main() {
 	must(unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts))
 	baseMonoNs := uint64(ts.Sec)*1e9 + uint64(ts.Nsec)
 	baseEpoch := time.Now()
+	startTime := time.Now()
+	var eventsRead uint64
+	var flowsFlushed uint64
 
 	flows := make(map[FlowKey]*FlowAgg)
 	var mu sync.Mutex
@@ -231,6 +313,7 @@ func main() {
 			outW.WriteByte('\n')
 		}
 		outW.Flush()
+		flowsFlushed += uint64(len(flows))
 		flows = make(map[FlowKey]*FlowAgg)
 	}
 
@@ -257,6 +340,38 @@ func main() {
 			if mode == "flow" || mode == "both" {
 				flush()
 			}
+			// Optional run metadata summary (useful for integrating tcpreplay results).
+			finalMeta := metaPath
+			if finalMeta == "" {
+				finalMeta = outPath + ".meta.json"
+			}
+			summary := map[string]any{
+				"start_rfc3339": startTime.UTC().Format(time.RFC3339),
+				"end_rfc3339":   time.Now().UTC().Format(time.RFC3339),
+				"duration_s":    time.Since(startTime).Seconds(),
+				"obj":           objPath,
+				"out":           outPath,
+				"events":        eventsPath,
+				"flush_s":       flushSec,
+				"mode":          mode,
+				"pkt_iface":     pktIface,
+				"disable_kprobes": disableKprobes,
+				"events_read":   eventsRead,
+				"flows_flushed": flowsFlushed,
+			}
+			if tcpreplayMetaPath != "" {
+				if m, err := readJSONFile(tcpreplayMetaPath); err == nil {
+					summary["tcpreplay"] = m
+				} else {
+					summary["tcpreplay_error"] = err.Error()
+				}
+			}
+			if err := os.MkdirAll(filepath.Dir(finalMeta), 0o755); err == nil {
+				if b, err := json.MarshalIndent(summary, "", "  "); err == nil {
+					_ = os.WriteFile(finalMeta, b, 0o644)
+					fmt.Println("[*] wrote run meta:", finalMeta)
+				}
+			}
 			return
 
 		default:
@@ -276,10 +391,13 @@ func main() {
 
 			var e Event
 			must(binary.Read(bytes.NewBuffer(rec.RawSample[:want]), binary.LittleEndian, &e))
+			eventsRead++
 
-			// Convert kernel big-endian IPv4 to dotted string
-			saddrStr := u32ToIPv4StrBE(ntohl(e.Saddr))
-			daddrStr := u32ToIPv4StrBE(ntohl(e.Daddr))
+			// Normalize addresses: BPF emits __be32; on little-endian hosts we must ntohl.
+			saddrU32 := ntohl(e.Saddr)
+			daddrU32 := ntohl(e.Daddr)
+			saddrStr := u32ToIPv4StrBE(saddrU32)
+			daddrStr := u32ToIPv4StrBE(daddrU32)
 			commStr := cstr(e.Comm[:])
 			evEpoch := monoToEpochSec(e.TsNs, baseEpoch, baseMonoNs)
 
@@ -290,8 +408,8 @@ func main() {
 					Pid:        e.Pid,
 					Uid:        e.Uid,
 					Comm:       commStr,
-					Saddr:      e.Saddr,
-					Daddr:      e.Daddr,
+					Saddr:      saddrU32,
+					Daddr:      daddrU32,
 					Sport:      e.Sport,
 					Dport:      e.Dport,
 					Proto:      e.Proto,
@@ -310,7 +428,7 @@ func main() {
 			}
 
 			if mode == "flow" || mode == "both" {
-				k := FlowKey{Saddr: e.Saddr, Daddr: e.Daddr, Sport: e.Sport, Dport: e.Dport, Proto: e.Proto}
+				k := FlowKey{Saddr: saddrU32, Daddr: daddrU32, Sport: e.Sport, Dport: e.Dport, Proto: e.Proto}
 
 				mu.Lock()
 				a := flows[k]
@@ -320,8 +438,8 @@ func main() {
 						LastMonoNs:  e.TsNs,
 						FirstEpochS: evEpoch,
 						LastEpochS:  evEpoch,
-						Saddr:       e.Saddr,
-						Daddr:       e.Daddr,
+						Saddr:       saddrU32,
+						Daddr:       daddrU32,
 						Sport:       e.Sport,
 						Dport:       e.Dport,
 						Proto:       e.Proto,
@@ -343,7 +461,7 @@ func main() {
 				a.UidMode = e.Uid
 				a.CommMode = commStr
 
-				switch e.Evtype {
+					switch e.Evtype {
 				case 1:
 					a.StateChanges++
 				case 2:
@@ -352,6 +470,13 @@ func main() {
 					a.BytesRecv += e.Bytes
 				case 4:
 					a.Retransmits += e.Retransmits
+					case 5:
+						// Packet events: state_old carries skb->pkt_type.
+						if e.StateOld == 4 {
+							a.BytesSent += e.Bytes
+						} else {
+							a.BytesRecv += e.Bytes
+						}
 				}
 
 				mu.Unlock()
