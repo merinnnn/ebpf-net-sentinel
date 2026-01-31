@@ -154,9 +154,7 @@ if [[ ! -f "$ZEEK_OUT_DIR/conn.log" ]]; then
   exit 1
 fi
 
-python3 "$ROOT_DIR/ubuntu/zeek_conn_to_csv.py" \
-  --in  "$ZEEK_OUT_DIR/conn.log" \
-  --out "$ZEEK_OUT_DIR/conn.csv"
+python3 "$ROOT_DIR/ubuntu/zeek_conn_to_csv.py" --in "$ZEEK_OUT_DIR/conn.log" --out "$ZEEK_OUT_DIR/conn.csv"
 echo "[*] Wrote $ZEEK_OUT_DIR/conn.csv"
 
 echo "[*] [2/5] Build eBPF collector"
@@ -170,8 +168,19 @@ if [[ -n "$SET_MTU" ]]; then
 fi
 
 echo "[*] [3/5] Start eBPF collector (netmon)"
-NETMON_BIN="$ROOT_DIR/ebpf_core/netmon"
-OBJ="$ROOT_DIR/ebpf_core/netmon.bpf.o"
+# ebpf_core builds artifacts into ebpf_core/bin by default.
+# Keep a fallback to the legacy paths in case the tree still has old artifacts.
+NETMON_BIN="$ROOT_DIR/ebpf_core/bin/netmon"
+OBJ="$ROOT_DIR/ebpf_core/bin/netmon.bpf.o"
+
+if [[ ! -x "$NETMON_BIN" && -x "$ROOT_DIR/ebpf_core/netmon" ]]; then
+  echo "[!] Using legacy netmon path: $ROOT_DIR/ebpf_core/netmon"
+  NETMON_BIN="$ROOT_DIR/ebpf_core/netmon"
+fi
+if [[ ! -f "$OBJ" && -f "$ROOT_DIR/ebpf_core/netmon.bpf.o" ]]; then
+  echo "[!] Using legacy BPF object path: $ROOT_DIR/ebpf_core/netmon.bpf.o"
+  OBJ="$ROOT_DIR/ebpf_core/netmon.bpf.o"
+fi
 
 if [[ ! -x "$NETMON_BIN" ]]; then
   echo "[x] netmon binary not found/executable: $NETMON_BIN"
@@ -201,12 +210,18 @@ fi
 
 # Start netmon under sudo, but capture the *real* netmon PID (not the sudo PID).
 # Also, keep logs in the run dir.
+# NOTE: ${START_ARGS[*]} would re-split arguments; build a shell-escaped command instead.
+NETMON_ARGS_ESC=""
+for a in "${START_ARGS[@]}"; do
+  NETMON_ARGS_ESC+=" $(printf '%q' "$a")"
+done
+
 sudo bash -c "
   set -euo pipefail
   ulimit -l unlimited || true
-  exec >>'$NETMON_LOG' 2>&1
-  '$NETMON_BIN' ${START_ARGS[*]} &
-  echo \$! >'$NETMON_PIDFILE'
+  exec >>'$(printf '%q' "$NETMON_LOG")' 2>&1
+  $(printf '%q' "$NETMON_BIN")${NETMON_ARGS_ESC} &
+  echo \$! >'$(printf '%q' "$NETMON_PIDFILE")'
 " 
 
 NETMON_PID="$(cat "$NETMON_PIDFILE" 2>/dev/null || true)"

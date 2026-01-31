@@ -36,8 +36,17 @@ ZEEK_DIR="$RUN_DIR/zeek"
 ZEEK_LOG="$RUN_DIR/zeek.log"
 ZEEK_PIDFILE="$RUN_DIR/zeek.pid"
 
-NETMON_BIN="$ROOT_DIR/ebpf_core/netmon"
-OBJ="$ROOT_DIR/ebpf_core/netmon.bpf.o"
+NETMON_BIN="$ROOT_DIR/ebpf_core/bin/netmon"
+OBJ="$ROOT_DIR/ebpf_core/bin/netmon.bpf.o"
+
+if [[ ! -x "$NETMON_BIN" && -x "$ROOT_DIR/ebpf_core/netmon" ]]; then
+  echo "[!] Using legacy netmon path: $ROOT_DIR/ebpf_core/netmon" >&2
+  NETMON_BIN="$ROOT_DIR/ebpf_core/netmon"
+fi
+if [[ ! -f "$OBJ" && -f "$ROOT_DIR/ebpf_core/netmon.bpf.o" ]]; then
+  echo "[!] Using legacy BPF object path: $ROOT_DIR/ebpf_core/netmon.bpf.o" >&2
+  OBJ="$ROOT_DIR/ebpf_core/netmon.bpf.o"
+fi
 NETMON_LOG="$RUN_DIR/netmon.log"
 NETMON_PIDFILE="$RUN_DIR/netmon.pid"
 EBPF_AGG="$RUN_DIR/ebpf_agg.jsonl"
@@ -77,7 +86,7 @@ cleanup() {
 
   # Try to export conn.csv if conn.log exists.
   if [[ -f "$ZEEK_DIR/conn.log" ]]; then
-    python3 "$ROOT_DIR/ubuntu/zeek_conn_to_csv.py" "$ZEEK_DIR/conn.log" "$ZEEK_DIR/conn.csv" >/dev/null 2>&1 || true
+    python3 "$ROOT_DIR/ubuntu/zeek_conn_to_csv.py" --in "$ZEEK_DIR/conn.log" --out "$ZEEK_DIR/conn.csv" >/dev/null 2>&1 || true
   fi
 
   # If netmon wrote files as root, return ownership to the invoking user.
@@ -122,11 +131,20 @@ if [[ "$DISABLE_KPROBES" == "1" ]]; then
 fi
 
 echo "[*] Starting netmon on $IFACE ..."
+# Shell-escape args so we don't lose quoting when passing through sudo bash -c.
+NETMON_CMD="$(printf '%q' "$NETMON_BIN")"
+for a in "${START_ARGS[@]}"; do
+  NETMON_CMD+=" $(printf '%q' "$a")"
+done
+NETMON_LOG_Q=$(printf '%q' "$NETMON_LOG")
+NETMON_PIDFILE_Q=$(printf '%q' "$NETMON_PIDFILE")
+
 sudo bash -c "
-  set -e
-  exec >>'$NETMON_LOG' 2>&1
-  '$NETMON_BIN' ${START_ARGS[*]} &
-  echo \$! > '$NETMON_PIDFILE'
+  set -euo pipefail
+  ulimit -l unlimited || true
+  exec >>${NETMON_LOG_Q} 2>&1
+  ${NETMON_CMD} &
+  echo \$! > ${NETMON_PIDFILE_Q}
 "
 
 echo "[*] Tail logs (Ctrl+C to stop):"
