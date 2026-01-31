@@ -16,6 +16,8 @@ set -euo pipefail
 #   DISABLE_KPROBES=1        # default: 1 (use tracepoints only)
 #   MODE=flow                # flow|events|both (default: flow)
 #   SET_MTU=9000             # optional: set MTU for IFACE_CAPTURE and REPLAY_IFACE before replay
+#   FORCE_BUILD=0            # set to 1 to force rebuild netmon + BPF object (make clean all)
+#   PRECHECK_IFACES=1        # default: 1; fail fast if IFACE_CAPTURE/REPLAY_IFACE don't exist
 
 PCAP_IN="${1:-}"
 IFACE_CAPTURE="${2:-}"
@@ -46,6 +48,8 @@ FLUSH_SECS="${FLUSH_SECS:-5}"
 MODE="${MODE:-flow}"
 DISABLE_KPROBES="${DISABLE_KPROBES:-1}"
 SET_MTU="${SET_MTU:-}"
+FORCE_BUILD="${FORCE_BUILD:-0}"
+PRECHECK_IFACES="${PRECHECK_IFACES:-1}"
 
 RUN_TS="$(date +%F_%H%M%S)"
 RUN_DIR="$DATA_DIR/runs/$RUN_TS"
@@ -60,6 +64,20 @@ RUN_META="$RUN_DIR/run_meta.json"
 TCPREPLAY_META="$RUN_DIR/tcpreplay_meta.json"
 
 exec > >(tee -a "$DEBUG_LOG") 2>&1
+
+if [[ "$PRECHECK_IFACES" == "1" ]]; then
+  echo "[*] Precheck: validating interfaces exist and are UP"
+  if ! ip link show "$IFACE_CAPTURE" >/dev/null 2>&1; then
+    echo "[x] IFACE_CAPTURE not found: $IFACE_CAPTURE"
+    echo "    Hint: ip link show"
+    exit 1
+  fi
+  if ! ip link show "$REPLAY_IFACE" >/dev/null 2>&1; then
+    echo "[x] REPLAY_IFACE not found: $REPLAY_IFACE"
+    echo "    Hint: ip link show"
+    exit 1
+  fi
+fi
 
 echo "[*] Inputs:"
 echo "  PCAP : $PCAP_PATH"
@@ -158,7 +176,12 @@ python3 "$ROOT_DIR/ubuntu/zeek_conn_to_csv.py" --in "$ZEEK_OUT_DIR/conn.log" --o
 echo "[*] Wrote $ZEEK_OUT_DIR/conn.csv"
 
 echo "[*] [2/5] Build eBPF collector"
-make -C "$ROOT_DIR/ebpf_core"
+if [[ "$FORCE_BUILD" == "1" ]]; then
+  echo "[*] FORCE_BUILD=1 -> make clean all"
+  make -C "$ROOT_DIR/ebpf_core" clean all
+else
+  make -C "$ROOT_DIR/ebpf_core"
+fi
 
 # Optional MTU bump (helps tcpreplay "Message too long" on veth)
 if [[ -n "$SET_MTU" ]]; then
@@ -191,6 +214,14 @@ if [[ ! -f "$OBJ" ]]; then
   exit 1
 fi
 
+if [[ "$FORCE_BUILD" != "1" ]] && command -v strings >/dev/null 2>&1; then
+  if strings "$NETMON_BIN" 2>/dev/null | grep -q "route ip+net"; then
+    echo "[!] Detected 'route ip+net' string inside netmon binary." 
+    echo "    This usually means you are running an older netmon build."
+    echo "    Re-run with: FORCE_BUILD=1 bash ubuntu/run_capture.sh ..."
+  fi
+fi
+
 echo "[*]   netmon log file: $NETMON_LOG"
 echo "[*]   pid file: $NETMON_PIDFILE"
 
@@ -209,20 +240,15 @@ if [[ "$DISABLE_KPROBES" == "1" ]]; then
 fi
 
 # Start netmon under sudo, but capture the *real* netmon PID (not the sudo PID).
-# Also, keep logs in the run dir.
-# NOTE: ${START_ARGS[*]} would re-split arguments; build a shell-escaped command instead.
-NETMON_ARGS_ESC=""
-for a in "${START_ARGS[@]}"; do
-  NETMON_ARGS_ESC+=" $(printf '%q' "$a")"
-done
-
-sudo bash -c "
+# Use "$@" to preserve proper argument boundaries (no word-splitting pitfalls).
+sudo bash -c '
   set -euo pipefail
   ulimit -l unlimited || true
-  exec >>'$(printf '%q' "$NETMON_LOG")' 2>&1
-  $(printf '%q' "$NETMON_BIN")${NETMON_ARGS_ESC} &
-  echo \$! >'$(printf '%q' "$NETMON_PIDFILE")'
-" 
+  exec >>"$1" 2>&1
+  shift
+  "$@" &
+  echo $! >"$0"
+' "$NETMON_PIDFILE" "$NETMON_LOG" "$NETMON_BIN" "${START_ARGS[@]}"
 
 NETMON_PID="$(cat "$NETMON_PIDFILE" 2>/dev/null || true)"
 if [[ -z "$NETMON_PID" ]]; then
@@ -233,9 +259,15 @@ fi
 
 sleep 0.3
 if ! sudo kill -0 "$NETMON_PID" 2>/dev/null; then
-  echo "[x] netmon died immediately. Last 120 lines:";
-  tail -n 120 "$NETMON_LOG" || true
+  echo "[x] netmon died immediately. Last 200 lines (if any):"
+  tail -n 200 "$NETMON_LOG" || true
   echo ""
+  if grep -q "route ip+net" "$NETMON_LOG" 2>/dev/null; then
+    echo "[!] Detected: 'route ip+net: no such network interface'"
+    echo "    Most common cause: the netmon binary wasn't rebuilt and you are running an old build."
+    echo "    Fix: FORCE_BUILD=1 bash ubuntu/run_capture.sh ... (or run: make -C ebpf_core clean all)"
+    echo ""
+  fi
   echo "[!] If you still see MEMLOCK/operation not permitted:"
   echo "    - Ensure you are not in a restricted container"
   echo "    - Check limits: sudo bash -c 'ulimit -l unlimited; ulimit -a'"
