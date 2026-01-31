@@ -1,81 +1,136 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IFACE="${1:?Usage: run_live.sh <iface|auto> [duration_sec]}"
-DUR_SEC="${2:-60}"
+# Live capture pipeline:
+#   - Start Zeek in live mode on IFACE
+#   - Start netmon (eBPF collector) on IFACE
+#   - Tail progress logs until you Ctrl+C
+#   - On exit, stop both and (best-effort) export zeek/conn.csv
+#
+# Usage:
+#   sudo bash ubuntu/run_live.sh <iface>
+#
+# Optional env:
+#   MODE=both              # flow|events|both (default: both)
+#   FLUSH_SECS=5           # netmon flush period (default: 5)
+#   DISABLE_KPROBES=1      # default: 1
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STAMP="$(date +%Y%m%d_%H%M%S)"
-OUTDIR="$ROOT_DIR/data/live_run/$STAMP"
-ZEEK_DIR="$OUTDIR/zeek"
-EBPF_OUT="$OUTDIR/ebpf_agg.jsonl"
-EBPF_EVENTS="$OUTDIR/ebpf_events.jsonl"
-
-mkdir -p "$OUTDIR" "$ZEEK_DIR"
-
-pick_default_iface() {
-  ip route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}'
-}
-
-iface_exists() {
-  ip link show "$1" >/dev/null 2>&1
-}
-
-if [[ "$IFACE" == "auto" || -z "$IFACE" ]]; then
-  IFACE="$(pick_default_iface || true)"
+IFACE="${1:-}"
+if [[ -z "$IFACE" ]]; then
+  echo "Usage: sudo bash ubuntu/run_live.sh <iface>"
+  exit 2
 fi
 
-if [[ -z "${IFACE:-}" || ! "$(iface_exists "$IFACE" && echo ok)" ]]; then
-  echo "[!] Invalid interface: '${IFACE:-}'" >&2
-  echo "[*] Available interfaces:" >&2
-  ip -o link show | awk -F': ' '{print "  - " $2}' >&2
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DATA_DIR="$ROOT_DIR/data"
+
+MODE="${MODE:-both}"
+FLUSH_SECS="${FLUSH_SECS:-5}"
+DISABLE_KPROBES="${DISABLE_KPROBES:-1}"
+
+RUN_TS="$(date +%F_%H%M%S)"
+RUN_DIR="$DATA_DIR/runs/live_${RUN_TS}"
+mkdir -p "$RUN_DIR"/{zeek,logs}
+
+ZEEK_DIR="$RUN_DIR/zeek"
+ZEEK_LOG="$RUN_DIR/zeek.log"
+ZEEK_PIDFILE="$RUN_DIR/zeek.pid"
+
+NETMON_BIN="$ROOT_DIR/ebpf_core/netmon"
+OBJ="$ROOT_DIR/ebpf_core/netmon.bpf.o"
+NETMON_LOG="$RUN_DIR/netmon.log"
+NETMON_PIDFILE="$RUN_DIR/netmon.pid"
+EBPF_AGG="$RUN_DIR/ebpf_agg.jsonl"
+EBPF_EVENTS="$RUN_DIR/ebpf_events.jsonl"
+RUN_META="$RUN_DIR/run_meta.json"
+
+cat >"$RUN_META" <<EOF
+{
+  "mode":"live",
+  "iface_capture":"$IFACE",
+  "timestamp":"$RUN_TS",
+  "run_dir":"$RUN_DIR"
+}
+EOF
+
+cleanup() {
+  local rc=$?
+
+  if [[ -f "$NETMON_PIDFILE" ]]; then
+    NETMON_PID="$(cat "$NETMON_PIDFILE" 2>/dev/null || true)"
+    if [[ -n "$NETMON_PID" ]] && sudo kill -0 "$NETMON_PID" 2>/dev/null; then
+      echo "[*] Stopping netmon (pid=$NETMON_PID) ..."
+      sudo kill -INT "$NETMON_PID" 2>/dev/null || true
+    fi
+  fi
+
+  if [[ -f "$ZEEK_PIDFILE" ]]; then
+    ZEEK_PID="$(cat "$ZEEK_PIDFILE" 2>/dev/null || true)"
+    if [[ -n "$ZEEK_PID" ]] && sudo kill -0 "$ZEEK_PID" 2>/dev/null; then
+      echo "[*] Stopping zeek (pid=$ZEEK_PID) ..."
+      sudo kill -INT "$ZEEK_PID" 2>/dev/null || true
+    fi
+  fi
+
+  # Give both a moment to exit and flush logs.
+  sleep 1
+
+  # Try to export conn.csv if conn.log exists.
+  if [[ -f "$ZEEK_DIR/conn.log" ]]; then
+    python3 "$ROOT_DIR/ubuntu/zeek_conn_to_csv.py" "$ZEEK_DIR/conn.log" "$ZEEK_DIR/conn.csv" >/dev/null 2>&1 || true
+  fi
+
+  # If netmon wrote files as root, return ownership to the invoking user.
+  if [[ -n "${SUDO_USER:-}" ]]; then
+    sudo chown -R "$SUDO_USER":"$SUDO_USER" "$RUN_DIR" 2>/dev/null || true
+  fi
+
+  exit $rc
+}
+trap cleanup EXIT INT TERM
+
+echo "[*] Live run folder: $RUN_DIR"
+echo "[*] Starting Zeek on $IFACE ..."
+
+sudo bash -c "
+  set -e
+  cd '$ZEEK_DIR'
+  exec >>'$ZEEK_LOG' 2>&1
+  zeek -i '$IFACE' LogAscii::use_json=T &
+  echo \$! > '$ZEEK_PIDFILE'
+" 
+
+echo "[*] Building netmon ..."
+make -C "$ROOT_DIR/ebpf_core" >/dev/null
+
+if [[ ! -x "$NETMON_BIN" || ! -f "$OBJ" ]]; then
+  echo "[x] netmon not built (expected $NETMON_BIN and $OBJ)"
   exit 1
 fi
 
-cleanup() {
-  echo "[*] Cleanup..."
-  if [[ -n "${EBPF_PID:-}" ]]; then
-    echo "[*] Stop eBPF collector (pid=$EBPF_PID)"
-    sudo kill -INT "$EBPF_PID" >/dev/null 2>&1 || true
-    wait "$EBPF_PID" >/dev/null 2>&1 || true
-  fi
-  if [[ -n "${ZEEK_PID:-}" ]]; then
-    echo "[*] Stop Zeek (pid=$ZEEK_PID)"
-    sudo kill -INT "$ZEEK_PID" >/dev/null 2>&1 || true
-    wait "$ZEEK_PID" >/dev/null 2>&1 || true
-  fi
+START_ARGS=(
+  -obj "$OBJ"
+  -out "$EBPF_AGG"
+  -events "$EBPF_EVENTS"
+  -flush "$FLUSH_SECS"
+  -mode "$MODE"
+  -pkt_iface "$IFACE"
+  -meta "$RUN_META"
+)
+if [[ "$DISABLE_KPROBES" == "1" ]]; then
+  START_ARGS+=( -disable_kprobes )
+fi
 
-  if [[ -f "$ZEEK_DIR/conn.log" ]]; then
-    echo "[*] Converting Zeek conn.log to conn.csv"
-    python3 "$ROOT_DIR/ubuntu/zeek_conn_to_csv.py" --in "$ZEEK_DIR/conn.log" --out "$ZEEK_DIR/conn.csv" || true
-  fi
-}
-trap cleanup EXIT
+echo "[*] Starting netmon on $IFACE ..."
+sudo bash -c "
+  set -e
+  exec >>'$NETMON_LOG' 2>&1
+  '$NETMON_BIN' ${START_ARGS[*]} &
+  echo \$! > '$NETMON_PIDFILE'
+"
 
-echo "[*] Live capture:"
-echo "  IFACE: $IFACE"
-echo "  DUR  : $DUR_SEC sec"
-echo "  OUT  : $OUTDIR"
-
-echo "[1/2] Start Zeek on interface"
-pushd "$ZEEK_DIR" >/dev/null
-sudo zeek -i "$IFACE" LogAscii::use_json=T > /dev/null &
-ZEEK_PID=$!
-popd >/dev/null
-echo "  zeek pid: $ZEEK_PID"
-sleep 1
-
-echo "[2/2] Start eBPF collector"
-pushd "$ROOT_DIR/ebpf_core" >/dev/null
-make
-sudo ./netmon -obj ./netmon.bpf.o -out "$EBPF_OUT" -events "$EBPF_EVENTS" -flush 5 -mode both &
-EBPF_PID=$!
-popd >/dev/null
-echo "  netmon pid: $EBPF_PID"
-
-sleep "$DUR_SEC"
-
-echo "[*] Outputs:"
-echo "  Zeek: $ZEEK_DIR/conn.csv"
-echo "  eBPF: $EBPF_OUT"
-echo "  Raw:  $EBPF_EVENTS"
+echo "[*] Tail logs (Ctrl+C to stop):"
+echo "    - $NETMON_LOG"
+echo "    - $ZEEK_LOG"
+echo ""
+tail -n 0 -f "$NETMON_LOG" "$ZEEK_LOG"
