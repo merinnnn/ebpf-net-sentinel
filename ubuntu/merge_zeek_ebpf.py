@@ -24,8 +24,9 @@ def normalize_key_cols(
         # already numeric
         return pd.to_numeric(series, errors="coerce")
 
-    out["k_saddr"] = to_u32(out[saddr_col]).astype("uint32")
-    out["k_daddr"] = to_u32(out[daddr_col]).astype("uint32")
+    # Use pandas' nullable integer dtype so IPv6 (-> NA) doesn't crash astype().
+    out["k_saddr"] = to_u32(out[saddr_col]).astype("UInt32")
+    out["k_daddr"] = to_u32(out[daddr_col]).astype("UInt32")
     out["k_sport"] = pd.to_numeric(out[sport_col], errors="coerce").fillna(0).astype(int)
     out["k_dport"] = pd.to_numeric(out[dport_col], errors="coerce").fillna(0).astype(int)
 
