@@ -154,7 +154,9 @@ if [[ ! -f "$ZEEK_OUT_DIR/conn.log" ]]; then
   exit 1
 fi
 
-python3 "$ROOT_DIR/ubuntu/zeek_conn_to_csv.py" "$ZEEK_OUT_DIR/conn.log" "$ZEEK_OUT_DIR/conn.csv"
+python3 "$ROOT_DIR/ubuntu/zeek_conn_to_csv.py" \
+  --in  "$ZEEK_OUT_DIR/conn.log" \
+  --out "$ZEEK_OUT_DIR/conn.csv"
 echo "[*] Wrote $ZEEK_OUT_DIR/conn.csv"
 
 echo "[*] [2/5] Build eBPF collector"
