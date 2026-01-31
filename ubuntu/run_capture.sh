@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Capture pipeline for a single PCAP:
+#   1) Run Zeek over the PCAP and produce zeek/conn.csv
+#   2) Start the eBPF collector (netmon)
+#   3) Replay the PCAP with tcpreplay into a chosen interface
+#   4) Stop netmon and leave all artifacts in data/runs/<timestamp>/
+#
 # Usage:
 #   bash ubuntu/run_capture.sh <pcap_name_or_path> <IFACE_CAPTURE> <MBPS>
 #
 # Optional env:
 #   REPLAY_IFACE=<iface>     # where tcpreplay sends packets (default: IFACE_CAPTURE)
-#   FLUSH_SECS=5             # netmon flush period (default: 5)
-#   DISABLE_KPROBES=1        # default: 1
-#   MODE=flow                # default: flow
+#   FLUSH_SECS=5             # netmon flush period seconds (default: 5)
+#   DISABLE_KPROBES=1        # default: 1 (use tracepoints only)
+#   MODE=flow                # flow|events|both (default: flow)
 #   SET_MTU=9000             # optional: set MTU for IFACE_CAPTURE and REPLAY_IFACE before replay
 
 PCAP_IN="${1:-}"
@@ -62,13 +68,28 @@ echo "  MBPS : $MBPS"
 echo "  OUT  : $RUN_DIR"
 echo "  REPLAY_IFACE: $REPLAY_IFACE"
 echo ""
-
 echo "[*] Debug log: $DEBUG_LOG"
 echo "[*] Tip: you can inspect this run folder anytime:"
 echo "  RUN=$RUN_DIR"
 echo ""
 
 NETMON_PID=""
+
+write_fallback_meta() {
+  if [[ ! -f "$RUN_META" ]]; then
+    cat >"$RUN_META" <<EOF
+{
+  "pcap":"$PCAP_PATH",
+  "iface_capture":"$IFACE_CAPTURE",
+  "replay_iface":"$REPLAY_IFACE",
+  "mbps":$MBPS,
+  "run_dir":"$RUN_DIR",
+  "timestamp":"$RUN_TS",
+  "note":"fallback meta written by run_capture.sh"
+}
+EOF
+  fi
+}
 
 cleanup() {
   local rc=$?
@@ -77,11 +98,10 @@ cleanup() {
   fi
 
   if [[ -n "${NETMON_PID:-}" ]]; then
-    # Try graceful stop, then harder if needed.
     if sudo kill -0 "$NETMON_PID" 2>/dev/null; then
       echo "[*] Stopping netmon (pid=$NETMON_PID) ..."
       sudo kill -INT "$NETMON_PID" 2>/dev/null || true
-      for _ in {1..30}; do
+      for _ in {1..40}; do
         if ! sudo kill -0 "$NETMON_PID" 2>/dev/null; then break; fi
         sleep 0.25
       done
@@ -95,21 +115,10 @@ cleanup() {
     fi
   fi
 
-  # Ensure run_meta exists (create early, but keep this as final safety)
-  if [[ ! -f "$RUN_META" ]]; then
-    echo "[!] run_meta.json missing; writing fallback meta"
-    cat >"$RUN_META" <<EOF
-{
-  "pcap":"$PCAP_PATH",
-  "iface_capture":"$IFACE_CAPTURE",
-  "replay_iface":"$REPLAY_IFACE",
-  "mbps":$MBPS,
-  "run_dir":"$RUN_DIR",
-  "timestamp":"$RUN_TS",
-  "note":"fallback meta written by run_capture.sh"
-}
-EOF
-  fi
+  write_fallback_meta
+
+  # netmon writes as root; make the run dir readable/editable by the user.
+  sudo chown -R "$(id -u):$(id -g)" "$RUN_DIR" 2>/dev/null || true
 
   exit $rc
 }
@@ -145,81 +154,7 @@ if [[ ! -f "$ZEEK_OUT_DIR/conn.log" ]]; then
   exit 1
 fi
 
-python3 - "$ZEEK_OUT_DIR/conn.log" "$ZEEK_OUT_DIR/conn.csv" <<'PY'
-import sys, csv
-
-in_path = sys.argv[1]
-out_path = sys.argv[2]
-
-wanted = [
-    ("ts", "ts"),
-    ("orig_h", "id.orig_h"),
-    ("resp_h", "id.resp_h"),
-    ("orig_p", "id.orig_p"),
-    ("resp_p", "id.resp_p"),
-    ("proto", "proto"),
-    ("duration", "duration"),
-    ("orig_bytes", "orig_bytes"),
-    ("resp_bytes", "resp_bytes"),
-    ("orig_pkts", "orig_pkts"),
-    ("resp_pkts", "resp_pkts"),
-    ("conn_state", "conn_state"),
-]
-
-fields = None
-unset_field = "-"
-empty_field = ""
-
-with open(in_path, "r", encoding="utf-8", errors="replace") as f:
-    for line in f:
-        line = line.rstrip("\n")
-        if not line.startswith("#"):
-            continue
-        if line.startswith("#unset_field"):
-            parts = line.split("\t", 1)
-            if len(parts) == 2:
-                unset_field = parts[1]
-        if line.startswith("#empty_field"):
-            parts = line.split("\t", 1)
-            if len(parts) == 2:
-                empty_field = parts[1]
-        if line.startswith("#fields"):
-            parts = line.split("\t")
-            fields = parts[1:]
-            break
-
-if not fields:
-    raise SystemExit("Could not find #fields line in conn.log")
-
-idx = {name: i for i, name in enumerate(fields)}
-missing = [src for _, src in wanted if src not in idx]
-if missing:
-    raise SystemExit(f"conn.log missing expected fields: {missing}")
-
-def norm(v: str) -> str:
-    if v == unset_field:
-        return ""
-    if empty_field and v == empty_field:
-        return ""
-    return v
-
-rows = 0
-with open(in_path, "r", encoding="utf-8", errors="replace") as fin, \
-     open(out_path, "w", newline="", encoding="utf-8") as fout:
-    w = csv.writer(fout)
-    for line in fin:
-        if not line or line.startswith("#"):
-            continue
-        parts = line.rstrip("\n").split("\t")
-        out = []
-        for _, src in wanted:
-            out.append(norm(parts[idx[src]]) if idx[src] < len(parts) else "")
-        w.writerow(out)
-        rows += 1
-
-print(f"Wrote {out_path} ({rows} rows)")
-PY
-
+python3 "$ROOT_DIR/ubuntu/zeek_conn_to_csv.py" "$ZEEK_OUT_DIR/conn.log" "$ZEEK_OUT_DIR/conn.csv"
 echo "[*] Wrote $ZEEK_OUT_DIR/conn.csv"
 
 echo "[*] [2/5] Build eBPF collector"
@@ -262,20 +197,31 @@ if [[ "$DISABLE_KPROBES" == "1" ]]; then
   START_ARGS+=( -disable_kprobes )
 fi
 
-# IMPORTANT: run netmon under sudo with memlock unlimited
-sudo bash -c "ulimit -l unlimited; exec '$NETMON_BIN' ${START_ARGS[*]}" >>"$NETMON_LOG" 2>&1 &
-NETMON_PID=$!
-echo "$NETMON_PID" >"$NETMON_PIDFILE"
+# Start netmon under sudo, but capture the *real* netmon PID (not the sudo PID).
+# Also, keep logs in the run dir.
+sudo bash -c "
+  set -euo pipefail
+  ulimit -l unlimited || true
+  exec >>'$NETMON_LOG' 2>&1
+  '$NETMON_BIN' ${START_ARGS[*]} &
+  echo \$! >'$NETMON_PIDFILE'
+" 
 
-# Wait a moment and validate it stays alive
+NETMON_PID="$(cat "$NETMON_PIDFILE" 2>/dev/null || true)"
+if [[ -z "$NETMON_PID" ]]; then
+  echo "[x] Failed to read netmon pid from $NETMON_PIDFILE"
+  tail -n 120 "$NETMON_LOG" || true
+  exit 1
+fi
+
 sleep 0.3
 if ! sudo kill -0 "$NETMON_PID" 2>/dev/null; then
-  echo "[x] netmon died immediately. Last 120 lines:"
+  echo "[x] netmon died immediately. Last 120 lines:";
   tail -n 120 "$NETMON_LOG" || true
   echo ""
   echo "[!] If you still see MEMLOCK/operation not permitted:"
-  echo "    Try: sudo bash -c 'ulimit -l unlimited; ulimit -a'"
-  echo "    And ensure you're not in a restricted container."
+  echo "    - Ensure you are not in a restricted container"
+  echo "    - Check limits: sudo bash -c 'ulimit -l unlimited; ulimit -a'"
   exit 1
 fi
 
@@ -293,7 +239,7 @@ echo "  [*] tcpreplay args: --intf1 $REPLAY_IFACE --mbps $MBPS --stats=1"
 echo "  [*] tcpreplay log -> $TCPREPLAY_LOG"
 
 sudo tcpreplay --intf1 "$REPLAY_IFACE" --mbps "$MBPS" --stats=1 "$PCAP_PATH" >"$TCPREPLAY_LOG" 2>&1 || {
-  echo "[x] tcpreplay failed. Last 80 lines:"
+  echo "[x] tcpreplay failed. Last 80 lines:";
   tail -n 80 "$TCPREPLAY_LOG" || true
   exit 1
 }
@@ -309,6 +255,9 @@ if sudo kill -0 "$NETMON_PID" 2>/dev/null; then
     sleep 0.25
   done
 fi
+
+write_fallback_meta
+sudo chown -R "$(id -u):$(id -g)" "$RUN_DIR" 2>/dev/null || true
 
 echo "[*] Done."
 echo "  Run folder: $RUN_DIR"
