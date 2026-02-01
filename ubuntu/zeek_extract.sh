@@ -42,7 +42,9 @@ if ! command -v zeek >/dev/null 2>&1; then
 fi
 
 mkdir -p "$OUTDIR"
-ZEEK_LOG="$OUTDIR/zeek_extract.log"
+
+# Use an absolute log path.
+ZEEK_LOG="$(cd "$OUTDIR" && pwd)/zeek_extract.log"
 
 echo "[*] Running Zeek on: $PCAP_PATH"
 echo "[*] Output dir: $OUTDIR"
