@@ -29,6 +29,7 @@ fi
 
 # Ensure output dir exists before we try to write logs/files.
 mkdir -p "$OUTDIR"
+OUTDIR="$(cd "$OUTDIR" && pwd)"
 
 LOG="$OUTDIR/zeek_extract.log"
 exec > >(tee -a "$LOG") 2>&1
