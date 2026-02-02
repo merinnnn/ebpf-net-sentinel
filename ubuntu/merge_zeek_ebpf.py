@@ -253,16 +253,23 @@ def main():
     )
     merged = merged[ok].copy()
 
-    merged["ebpf_bytes_sent"] = merged.get("bytes_sent", 0).fillna(0).astype(float)
-    merged["ebpf_bytes_recv"] = merged.get("bytes_recv", 0).fillna(0).astype(float)
-    merged["ebpf_retransmits"] = merged.get("retransmits", 0).fillna(0).astype(float)
-    merged["ebpf_state_changes"] = merged.get("state_changes", 0).fillna(0).astype(float)
-    merged["ebpf_samples"] = merged.get("samples", 0).fillna(0).astype(float)
+    def col(df, name, default):
+        """Return column as Series if present, else a default-valued Series aligned to df."""
+        if name in df.columns:
+            return df[name]
+        import pandas as pd
+        return pd.Series([default] * len(df), index=df.index)
+
+    merged["ebpf_bytes_sent"] = col(merged, "bytes_sent", 0).fillna(0).astype(float)
+    merged["ebpf_bytes_recv"] = col(merged, "bytes_recv", 0).fillna(0).astype(float)
+    merged["ebpf_retransmits"] = col(merged, "retransmits", 0).fillna(0).astype(float)
+    merged["ebpf_state_changes"] = col(merged, "state_changes", 0).fillna(0).astype(float)
+    merged["ebpf_samples"] = col(merged, "samples", 0).fillna(0).astype(float)
 
     # Process context (mode of last-seen process for the flow)
-    merged["ebpf_pid"] = merged.get("pid_mode", 0).fillna(0).astype(int)
-    merged["ebpf_uid"] = merged.get("uid_mode", 0).fillna(0).astype(int)
-    merged["ebpf_comm"] = merged.get("comm_mode", "").fillna("").astype(str)
+    merged["ebpf_pid"] = col(merged, "pid_mode", 0).fillna(0).astype(int)
+    merged["ebpf_uid"] = col(merged, "uid_mode", 0).fillna(0).astype(int)
+    merged["ebpf_comm"] = col(merged, "comm_mode", "").fillna("").astype(str)
 
     # Optional run metadata (tcpreplay, interface, etc.)
     run_meta_cols = []
