@@ -123,6 +123,13 @@ func ntohl(u uint32) uint32 {
 		(u&0xFF000000)>>24
 }
 
+// Convert uint32 in host byte order to IPv4 string
+func u32ToIPv4Str(u uint32) string {
+	b := []byte{byte(u), byte(u >> 8), byte(u >> 16), byte(u >> 24)}
+	return net.IP(b).String()
+}
+
+// Convert uint32 in network byte order to IPv4 string
 func u32ToIPv4StrBE(u uint32) string {
 	b := []byte{byte(u >> 24), byte(u >> 16), byte(u >> 8), byte(u)}
 	return net.IP(b).String()
@@ -433,10 +440,26 @@ func main() {
 		}
 		eventsRead++
 
-		saddrU32 := ntohl(e.Saddr)
-		daddrU32 := ntohl(e.Daddr)
-		saddrStr := u32ToIPv4StrBE(saddrU32)
-		daddrStr := u32ToIPv4StrBE(daddrU32)
+		// Handle byte order based on event type
+		// evtype=5 (socket filter/packet events): IPs are in network byte order
+		// evtype=1,2,3,4 (kprobes): IPs are already in host byte order
+		var saddrU32, daddrU32 uint32
+		var saddrStr, daddrStr string
+		
+		if e.Evtype == 5 {
+			// Socket filter event - IPs in network byte order, need conversion
+			saddrU32 = ntohl(e.Saddr)
+			daddrU32 = ntohl(e.Daddr)
+			saddrStr = u32ToIPv4StrBE(saddrU32)
+			daddrStr = u32ToIPv4StrBE(daddrU32)
+		} else {
+			// Kprobe event - IPs already in host byte order
+			saddrU32 = e.Saddr
+			daddrU32 = e.Daddr
+			saddrStr = u32ToIPv4Str(saddrU32)
+			daddrStr = u32ToIPv4Str(daddrU32)
+		}
+
 		commStr := cstr(e.Comm[:])
 		evEpoch := monoToEpochSec(e.TsNs, baseEpoch, baseMonoNs)
 
