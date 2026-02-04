@@ -15,6 +15,7 @@ sudo apt-get install -y \
   linux-tools-common linux-tools-generic linux-tools-$(uname -r) \
   libbpf-dev libelf-dev zlib1g-dev \
   tcpreplay tcpdump \
+  tshark \
   python3 python3-pip python3-venv
 
 # Install Go 1.21+ (1.13.8 on ubuntu 20.04)
@@ -59,6 +60,7 @@ bpftool version
 clang --version
 tcpdump --version
 tcpreplay --version
+editcap -h 2>&1 | head -1 || echo "[!] editcap not found"
 go version
 
 echo "[*] Base Ubuntu eBPF tooling setup complete."
