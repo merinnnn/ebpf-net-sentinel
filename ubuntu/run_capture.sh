@@ -69,12 +69,10 @@ if [[ "$PRECHECK_IFACES" == "1" ]]; then
   echo "[*] Precheck: validating interfaces exist and are UP"
   if ! ip link show "$IFACE_CAPTURE" >/dev/null 2>&1; then
     echo "[x] IFACE_CAPTURE not found: $IFACE_CAPTURE"
-    echo "    Hint: ip link show"
     exit 1
   fi
   if ! ip link show "$REPLAY_IFACE" >/dev/null 2>&1; then
     echo "[x] REPLAY_IFACE not found: $REPLAY_IFACE"
-    echo "    Hint: ip link show"
     exit 1
   fi
 fi
@@ -85,10 +83,6 @@ echo "  IFACE: $IFACE_CAPTURE"
 echo "  MBPS : $MBPS"
 echo "  OUT  : $RUN_DIR"
 echo "  REPLAY_IFACE: $REPLAY_IFACE"
-echo ""
-echo "[*] Debug log: $DEBUG_LOG"
-echo "[*] Tip: you can inspect this run folder anytime:"
-echo "  RUN=$RUN_DIR"
 echo ""
 
 NETMON_PID=""
@@ -102,8 +96,7 @@ write_fallback_meta() {
   "replay_iface":"$REPLAY_IFACE",
   "mbps":$MBPS,
   "run_dir":"$RUN_DIR",
-  "timestamp":"$RUN_TS",
-  "note":"fallback meta written by run_capture.sh"
+  "timestamp":"$RUN_TS"
 }
 EOF
   fi
@@ -111,38 +104,18 @@ EOF
 
 cleanup() {
   local rc=$?
-  if [[ $rc -ne 0 ]]; then
-    echo "[!] Cleanup handler fired (rc=$rc)"
-  fi
-
   if [[ -n "${NETMON_PID:-}" ]]; then
     if sudo kill -0 "$NETMON_PID" 2>/dev/null; then
-      echo "[*] Stopping netmon (pid=$NETMON_PID) ..."
       sudo kill -INT "$NETMON_PID" 2>/dev/null || true
-      for _ in {1..40}; do
-        if ! sudo kill -0 "$NETMON_PID" 2>/dev/null; then break; fi
-        sleep 0.25
-      done
-      if sudo kill -0 "$NETMON_PID" 2>/dev/null; then
-        sudo kill -TERM "$NETMON_PID" 2>/dev/null || true
-        sleep 0.5
-      fi
-      if sudo kill -0 "$NETMON_PID" 2>/dev/null; then
-        sudo kill -KILL "$NETMON_PID" 2>/dev/null || true
-      fi
+      sleep 1
     fi
   fi
-
   write_fallback_meta
-
-  # netmon writes as root; make the run dir readable/editable by the user.
   sudo chown -R "$(id -u):$(id -g)" "$RUN_DIR" 2>/dev/null || true
-
   exit $rc
 }
 trap cleanup EXIT INT TERM
 
-# Create meta EARLY so it's never missing even if netmon fails
 cat >"$RUN_META" <<EOF
 {
   "pcap":"$PCAP_PATH",
@@ -154,7 +127,19 @@ cat >"$RUN_META" <<EOF
 }
 EOF
 
-echo "[*] [1/5] Zeek flow extraction"
+# Preprocess PCAP to handle jumbo frames
+echo "[*] [1/6] Preprocessing PCAP (truncate to MTU 1500)"
+FIXED_PCAP="$RUN_DIR/$(basename "$PCAP_PATH" .pcap)-fixed.pcap"
+if command -v editcap >/dev/null 2>&1; then
+  editcap -s 1500 "$PCAP_PATH" "$FIXED_PCAP"
+  PCAP_TO_REPLAY="$FIXED_PCAP"
+  echo "[*] Created MTU-safe PCAP: $FIXED_PCAP"
+else
+  echo "[!] editcap not found - using original PCAP (may hit MTU errors)"
+  PCAP_TO_REPLAY="$PCAP_PATH"
+fi
+
+echo "[*] [2/6] Zeek flow extraction"
 ZEEK_LOG="$RUN_DIR/zeek.log"
 ZEEK_OUT_DIR="$RUN_DIR/zeek"
 mkdir -p "$ZEEK_OUT_DIR"
@@ -166,64 +151,39 @@ echo "  [*] zeek -r $PCAP_PATH (logging -> $ZEEK_LOG)"
 )
 
 if [[ ! -f "$ZEEK_OUT_DIR/conn.log" ]]; then
-  echo "[x] Zeek did not produce conn.log at $ZEEK_OUT_DIR/conn.log"
-  echo "    Last 80 lines of zeek.log:"
-  tail -n 80 "$ZEEK_LOG" || true
+  echo "[x] Zeek did not produce conn.log"
   exit 1
 fi
 
 python3 "$ROOT_DIR/ubuntu/zeek_conn_to_csv.py" --in "$ZEEK_OUT_DIR/conn.log" --out "$ZEEK_OUT_DIR/conn.csv"
 echo "[*] Wrote $ZEEK_OUT_DIR/conn.csv"
 
-echo "[*] [2/5] Build eBPF collector"
+echo "[*] [3/6] Build eBPF collector"
 if [[ "$FORCE_BUILD" == "1" ]]; then
-  echo "[*] FORCE_BUILD=1 -> make clean all"
   make -C "$ROOT_DIR/ebpf_core" clean all
 else
   make -C "$ROOT_DIR/ebpf_core"
 fi
 
-# Optional MTU bump (helps tcpreplay "Message too long" on veth)
 if [[ -n "$SET_MTU" ]]; then
-  echo "[*] Setting MTU=$SET_MTU on $REPLAY_IFACE and $IFACE_CAPTURE (best-effort)"
+  echo "[*] Setting MTU=$SET_MTU on $REPLAY_IFACE and $IFACE_CAPTURE"
   sudo ip link set dev "$REPLAY_IFACE" mtu "$SET_MTU" 2>/dev/null || true
   sudo ip link set dev "$IFACE_CAPTURE" mtu "$SET_MTU" 2>/dev/null || true
 fi
 
-echo "[*] [3/5] Start eBPF collector (netmon)"
-# ebpf_core builds artifacts into ebpf_core/bin by default.
-# Keep a fallback to the legacy paths in case the tree still has old artifacts.
+echo "[*] [4/6] Start eBPF collector (netmon)"
 NETMON_BIN="$ROOT_DIR/ebpf_core/bin/netmon"
 OBJ="$ROOT_DIR/ebpf_core/bin/netmon.bpf.o"
 
 if [[ ! -x "$NETMON_BIN" && -x "$ROOT_DIR/ebpf_core/netmon" ]]; then
-  echo "[!] Using legacy netmon path: $ROOT_DIR/ebpf_core/netmon"
   NETMON_BIN="$ROOT_DIR/ebpf_core/netmon"
 fi
 if [[ ! -f "$OBJ" && -f "$ROOT_DIR/ebpf_core/netmon.bpf.o" ]]; then
-  echo "[!] Using legacy BPF object path: $ROOT_DIR/ebpf_core/netmon.bpf.o"
   OBJ="$ROOT_DIR/ebpf_core/netmon.bpf.o"
 fi
 
-if [[ ! -x "$NETMON_BIN" ]]; then
-  echo "[x] netmon binary not found/executable: $NETMON_BIN"
-  exit 1
-fi
-if [[ ! -f "$OBJ" ]]; then
-  echo "[x] BPF object not found: $OBJ"
-  exit 1
-fi
-
-if [[ "$FORCE_BUILD" != "1" ]] && command -v strings >/dev/null 2>&1; then
-  if strings "$NETMON_BIN" 2>/dev/null | grep -q "route ip+net"; then
-    echo "[!] Detected 'route ip+net' string inside netmon binary." 
-    echo "    This usually means you are running an older netmon build."
-    echo "    Re-run with: FORCE_BUILD=1 bash ubuntu/run_capture.sh ..."
-  fi
-fi
-
-echo "[*]   netmon log file: $NETMON_LOG"
-echo "[*]   pid file: $NETMON_PIDFILE"
+# Attach socket filter to REPLAY_IFACE (where tcpreplay sends)
+echo "[*]   eBPF socket filter will attach to: $REPLAY_IFACE"
 
 START_ARGS=(
   -obj "$OBJ"
@@ -231,7 +191,7 @@ START_ARGS=(
   -events "$EBPF_EVENTS"
   -flush "$FLUSH_SECS"
   -mode "$MODE"
-  -pkt_iface "$IFACE_CAPTURE"
+  -pkt_iface "$REPLAY_IFACE"
   -meta "$RUN_META"
   -tcpreplay_meta "$TCPREPLAY_META"
 )
@@ -239,8 +199,6 @@ if [[ "$DISABLE_KPROBES" == "1" ]]; then
   START_ARGS+=( -disable_kprobes )
 fi
 
-# Start netmon under sudo, but capture the *real* netmon PID (not the sudo PID).
-# Use "$@" to preserve proper argument boundaries (no word-splitting pitfalls).
 sudo bash -c '
   set -euo pipefail
   ulimit -l unlimited || true
@@ -251,58 +209,39 @@ sudo bash -c '
 ' "$NETMON_PIDFILE" "$NETMON_LOG" "$NETMON_BIN" "${START_ARGS[@]}"
 
 NETMON_PID="$(cat "$NETMON_PIDFILE" 2>/dev/null || true)"
-if [[ -z "$NETMON_PID" ]]; then
-  echo "[x] Failed to read netmon pid from $NETMON_PIDFILE"
-  tail -n 120 "$NETMON_LOG" || true
-  exit 1
-fi
+sleep 0.5
 
-sleep 0.3
 if ! sudo kill -0 "$NETMON_PID" 2>/dev/null; then
-  echo "[x] netmon died immediately. Last 200 lines (if any):"
-  tail -n 200 "$NETMON_LOG" || true
-  echo ""
-  if grep -q "route ip+net" "$NETMON_LOG" 2>/dev/null; then
-    echo "[!] Detected: 'route ip+net: no such network interface'"
-    echo "    Most common cause: the netmon binary wasn't rebuilt and you are running an old build."
-    echo "    Fix: FORCE_BUILD=1 bash ubuntu/run_capture.sh ... (or run: make -C ebpf_core clean all)"
-    echo ""
-  fi
-  echo "[!] If you still see MEMLOCK/operation not permitted:"
-  echo "    - Ensure you are not in a restricted container"
-  echo "    - Check limits: sudo bash -c 'ulimit -l unlimited; ulimit -a'"
+  echo "[x] netmon died immediately"
+  tail -n 50 "$NETMON_LOG" || true
   exit 1
 fi
 
 echo "[*]   netmon pid: $NETMON_PID"
-echo "[*] netmon running confirmed"
 
-echo "[*] [4/5] Replay PCAP (tcpreplay)"
-if ! command -v tcpreplay >/dev/null 2>&1; then
-  echo "[x] tcpreplay not installed"
-  exit 1
-fi
-
+echo "[*] [5/6] Replay PCAP (tcpreplay)"
 TCPREPLAY_LOG="$RUN_DIR/tcpreplay.log"
-echo "  [*] tcpreplay args: --intf1 $REPLAY_IFACE --mbps $MBPS --stats=1"
+
+# Use --topspeed for efficient replay
+echo "  [*] tcpreplay args: --intf1 $REPLAY_IFACE --topspeed --stats=1"
 echo "  [*] tcpreplay log -> $TCPREPLAY_LOG"
 
-sudo tcpreplay --intf1 "$REPLAY_IFACE" --mbps "$MBPS" --stats=1 "$PCAP_PATH" >"$TCPREPLAY_LOG" 2>&1 || {
-  echo "[x] tcpreplay failed. Last 80 lines:";
-  tail -n 80 "$TCPREPLAY_LOG" || true
+sudo tcpreplay --intf1 "$REPLAY_IFACE" \
+  --topspeed \
+  --stats=1 \
+  "$PCAP_TO_REPLAY" >"$TCPREPLAY_LOG" 2>&1 || {
+  echo "[x] tcpreplay failed";
+  tail -n 50 "$TCPREPLAY_LOG" || true
   exit 1
 }
 
-echo "[*] [5/5] Waiting $((FLUSH_SECS + 2))s to allow netmon to flush..."
+echo "[*] [6/6] Waiting $((FLUSH_SECS + 2))s to allow netmon to flush..."
 sleep "$((FLUSH_SECS + 2))"
 
-echo "[*] Stop netmon (final flush + meta)"
+echo "[*] Stop netmon (final flush)"
 if sudo kill -0 "$NETMON_PID" 2>/dev/null; then
   sudo kill -INT "$NETMON_PID" 2>/dev/null || true
-  for _ in {1..40}; do
-    if ! sudo kill -0 "$NETMON_PID" 2>/dev/null; then break; fi
-    sleep 0.25
-  done
+  sleep 2
 fi
 
 write_fallback_meta
@@ -311,4 +250,4 @@ sudo chown -R "$(id -u):$(id -g)" "$RUN_DIR" 2>/dev/null || true
 echo "[*] Done."
 echo "  Run folder: $RUN_DIR"
 echo "  Outputs:"
-ls -lah "$EBPF_AGG" "$EBPF_EVENTS" "$RUN_META" "$TCPREPLAY_META" 2>/dev/null || true
+ls -lah "$EBPF_AGG" "$EBPF_EVENTS" "$RUN_META" 2>/dev/null || true
