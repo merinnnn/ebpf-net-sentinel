@@ -24,7 +24,9 @@ echo "[*] Installing Go ${GO_VER}..."
 sudo apt-get remove -y golang-go golang || true
 
 cd /tmp
-wget -q --show-progress -O "go${GO_VER}.linux-amd64.tar.gz" "https://go.dev/dl/go${GO_VER}.linux-amd64.tar.gz"
+curl -L --fail --retry 5 --retry-delay 2 --connect-timeout 15 \
+  -o "go${GO_VER}.linux-amd64.tar.gz" \
+  "https://dl.google.com/go/go${GO_VER}.linux-amd64.tar.gz"
 sudo rm -rf /usr/local/go
 sudo tar -C /usr/local -xzf "go${GO_VER}.linux-amd64.tar.gz"
 rm -f "go${GO_VER}.linux-amd64.tar.gz"
