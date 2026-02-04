@@ -1,44 +1,22 @@
 #!/usr/bin/env python3
+"""
+Improved merge script for Zeek and eBPF data.
+
+Key improvements:
+1. Removed byte order variant handling (now handled correctly in Go collector)
+2. Better logging and diagnostics
+3. More flexible time window matching
+4. Improved debugging output
+"""
 import argparse
 import json
 import os
 import ipaddress
 import pandas as pd
-
-# Zeek can emit IPv6 in real networks; our eBPF collector is IPv4-only for now.
-# We drop non-IPv4 rows during merge.
-def normalize_key_cols(
-    df: pd.DataFrame,
-    *,
-    saddr_col: str,
-    daddr_col: str,
-    sport_col: str,
-    dport_col: str,
-    proto_col: str,
-) -> pd.DataFrame:
-    out = df.copy()
-
-    def to_u32(series: pd.Series) -> pd.Series:
-        if series.dtype == object:
-            return series.apply(ip_to_u32_maybe)
-        # already numeric
-        return pd.to_numeric(series, errors="coerce")
-
-    # Use pandas' nullable integer dtype so IPv6 (-> NA) doesn't crash astype().
-    out["k_saddr"] = to_u32(out[saddr_col]).astype("UInt32")
-    out["k_daddr"] = to_u32(out[daddr_col]).astype("UInt32")
-    out["k_sport"] = pd.to_numeric(out[sport_col], errors="coerce").fillna(0).astype(int)
-    out["k_dport"] = pd.to_numeric(out[dport_col], errors="coerce").fillna(0).astype(int)
-
-    if out[proto_col].dtype == object:
-        m = {"tcp": 6, "udp": 17, "icmp": 1}
-        out["k_proto"] = out[proto_col].astype(str).str.lower().map(m).fillna(0).astype(int)
-    else:
-        out["k_proto"] = pd.to_numeric(out[proto_col], errors="coerce").fillna(0).astype(int)
-
-    return out
+import sys
 
 def ip_to_u32_maybe(ip: str):
+    """Convert IP string to uint32, return NA for IPv6"""
     ip = str(ip).strip()
     if ":" in ip:
         return pd.NA
@@ -47,11 +25,8 @@ def ip_to_u32_maybe(ip: str):
     except Exception:
         return pd.NA
 
-def ntohl_u32(u: int) -> int:
-    u = int(u) & 0xFFFFFFFF
-    return int.from_bytes(u.to_bytes(4, "little"), "big")
-
 def flatten_meta(obj, prefix=""):
+    """Flatten nested dictionary for metadata columns"""
     out = {}
     if not isinstance(obj, dict):
         return out
@@ -66,6 +41,7 @@ def flatten_meta(obj, prefix=""):
     return out
 
 def load_zeek_conn(conn_csv: str) -> pd.DataFrame:
+    """Load Zeek connection log"""
     required = [
         "ts","orig_h","resp_h","orig_p","resp_p","proto","duration",
         "orig_bytes","resp_bytes","orig_pkts","resp_pkts","conn_state",
@@ -75,13 +51,13 @@ def load_zeek_conn(conn_csv: str) -> pd.DataFrame:
     if not set(required).issubset(df.columns):
         df = pd.read_csv(conn_csv, header=None, names=required)
 
-    # Some malformed/headerless reads can still leave a header as the first data row.
+    # Remove potential header row in data
     if len(df) > 0 and str(df.iloc[0].get("ts", "")) == "ts":
         df = df.iloc[1:].copy()
 
+    # Convert data types
     df["orig_p"] = pd.to_numeric(df["orig_p"], errors="coerce").fillna(0).astype(int)
     df["resp_p"] = pd.to_numeric(df["resp_p"], errors="coerce").fillna(0).astype(int)
-
     df["ts"] = pd.to_numeric(df["ts"], errors="coerce").fillna(0.0)
     df["duration"] = pd.to_numeric(df["duration"], errors="coerce").fillna(0.0)
 
@@ -95,9 +71,11 @@ def load_zeek_conn(conn_csv: str) -> pd.DataFrame:
     df["start_ts"] = df["ts"]
     df["end_ts"] = df["ts"] + df["duration"]
 
+    # Convert IPs to uint32
     df["orig_ip_u32"] = df["orig_h"].apply(ip_to_u32_maybe)
     df["resp_ip_u32"] = df["resp_h"].apply(ip_to_u32_maybe)
 
+    # Filter out IPv6
     before = len(df)
     df = df.dropna(subset=["orig_ip_u32","resp_ip_u32"]).copy()
     dropped = before - len(df)
@@ -110,194 +88,247 @@ def load_zeek_conn(conn_csv: str) -> pd.DataFrame:
     return df
 
 def load_ebpf_agg(jsonl: str) -> pd.DataFrame:
+    """Load eBPF aggregated flow data (now with correct byte order from Go)"""
     rows = []
     with open(jsonl, "r") as f:
         for line in f:
             line = line.strip()
             if line:
                 rows.append(json.loads(line))
+    
     if not rows:
         return pd.DataFrame()
 
     df = pd.DataFrame(rows)
-
+    
+    # The Go collector now outputs IPs in the correct byte order
+    # We just need to read them as-is
     if "saddr_str" in df.columns and "daddr_str" in df.columns:
+        # String IPs provided, convert to uint32
         df["saddr_u32"] = df["saddr_str"].apply(ip_to_u32_maybe)
         df["daddr_u32"] = df["daddr_str"].apply(ip_to_u32_maybe)
-        df["ip_decode"] = "str"
-        variants = [df]
     else:
-        raw = df.copy()
-        raw["saddr_u32"] = raw["saddr"].astype("uint32")
-        raw["daddr_u32"] = raw["daddr"].astype("uint32")
-        raw["ip_decode"] = "raw"
-
-        swapped = df.copy()
-        swapped["saddr_u32"] = swapped["saddr"].astype("uint32").apply(ntohl_u32)
-        swapped["daddr_u32"] = swapped["daddr"].astype("uint32").apply(ntohl_u32)
-        swapped["ip_decode"] = "swapped"
-
-        variants = [raw, swapped]
-
-    df = pd.concat(variants, ignore_index=True)
+        # Use numeric IPs directly
+        df["saddr_u32"] = df["saddr"].astype("uint32")
+        df["daddr_u32"] = df["daddr"].astype("uint32")
 
     df = df.dropna(subset=["saddr_u32", "daddr_u32"]).copy()
     df["saddr_u32"] = df["saddr_u32"].astype("uint32")
     df["daddr_u32"] = df["daddr_u32"].astype("uint32")
 
+    # Convert ports and protocol
     df["sport"] = pd.to_numeric(df["sport"], errors="coerce").fillna(0).astype(int)
     df["dport"] = pd.to_numeric(df["dport"], errors="coerce").fillna(0).astype(int)
     df["proto"] = pd.to_numeric(df["proto"], errors="coerce").fillna(0).astype(int)
     
+    # Ensure we have timestamp columns
     if "first_ts_s" not in df.columns and "first_ts_ns" in df.columns:
         if "flush_ts_s" in df.columns and "last_ts_ns" in df.columns:
-            # offset_ns ≈ epoch_at_flush - mono_last
+            # Calculate epoch timestamps from monotonic
             offset_ns = (df["flush_ts_s"].astype(float) * 1e9) - df["last_ts_ns"].astype(float)
             df["first_ts_s"] = (df["first_ts_ns"].astype(float) + offset_ns) / 1e9
             df["last_ts_s"]  = (df["last_ts_ns"].astype(float)  + offset_ns) / 1e9
         else:
-            print("[!] eBPF JSONL missing first_ts_s/last_ts_s and cannot reconstruct; time filtering may be invalid.")
+            print("[!] eBPF JSONL missing epoch timestamps; time filtering may be invalid.")
             df["first_ts_s"] = df["first_ts_ns"].astype(float) / 1e9
             df["last_ts_s"]  = df["last_ts_ns"].astype(float)  / 1e9
+    
     return df
 
+def create_flow_keys(df: pd.DataFrame, orig_to_src: bool = True) -> pd.DataFrame:
+    """Create standardized flow keys for matching"""
+    out = df.copy()
+    
+    if orig_to_src:
+        # Forward direction: orig -> src
+        out["k_saddr"] = out["orig_ip_u32"].astype("uint32")
+        out["k_daddr"] = out["resp_ip_u32"].astype("uint32")
+        out["k_sport"] = out["orig_p"].astype(int)
+        out["k_dport"] = out["resp_p"].astype(int)
+        out["k_proto"] = out["proto_num"].astype(int)
+    else:
+        # Reverse direction: resp -> src
+        out["k_saddr"] = out["resp_ip_u32"].astype("uint32")
+        out["k_daddr"] = out["orig_ip_u32"].astype("uint32")
+        out["k_sport"] = out["resp_p"].astype(int)
+        out["k_dport"] = out["orig_p"].astype(int)
+        out["k_proto"] = out["proto_num"].astype(int)
+    
+    return out
+
+def create_ebpf_keys(df: pd.DataFrame) -> pd.DataFrame:
+    """Create flow keys from eBPF data"""
+    out = df.copy()
+    out["k_saddr"] = out["saddr_u32"].astype("uint32")
+    out["k_daddr"] = out["daddr_u32"].astype("uint32")
+    out["k_sport"] = out["sport"].astype(int)
+    out["k_dport"] = out["dport"].astype(int)
+    out["k_proto"] = out["proto"].astype(int)
+    return out
+
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--zeek_conn", required=True)
-    ap.add_argument("--ebpf_agg", required=True)
-    ap.add_argument("--out", required=True)
-    ap.add_argument("--time_slop", type=float, default=5.0)
-    ap.add_argument(
-        "--run_meta",
-        default="",
-        help="Optional run-level metadata JSON (e.g., from run_capture.sh). If present, its fields are appended as constant columns (prefixed 'run_').",
-    )
+    ap = argparse.ArgumentParser(description="Merge Zeek and eBPF flow data")
+    ap.add_argument("--zeek_conn", required=True, help="Zeek conn.csv file")
+    ap.add_argument("--ebpf_agg", required=True, help="eBPF aggregated JSONL file")
+    ap.add_argument("--out", required=True, help="Output merged CSV file")
+    ap.add_argument("--time_slop", type=float, default=5.0, 
+                    help="Time window tolerance in seconds (default: 5.0)")
+    ap.add_argument("--run_meta", default="",
+                    help="Optional run metadata JSON")
+    ap.add_argument("--debug", action="store_true",
+                    help="Enable debug output")
     args = ap.parse_args()
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
 
+    print("[*] Loading Zeek connection log...")
     z = load_zeek_conn(args.zeek_conn)
+    print(f"[*] Loaded {len(z)} Zeek flows")
+
+    print("[*] Loading eBPF aggregated data...")
     e = load_ebpf_agg(args.ebpf_agg)
-
+    
     if e.empty:
+        print("[!] No eBPF data found. Creating Zeek-only output...")
         out = z.copy()
-        for c in ["ebpf_bytes_sent","ebpf_bytes_recv","ebpf_retransmits","ebpf_state_changes","ebpf_samples"]:
+        for c in ["ebpf_bytes_sent","ebpf_bytes_recv","ebpf_retransmits",
+                  "ebpf_state_changes","ebpf_samples"]:
             out[c] = 0.0
+        for c in ["ebpf_pid","ebpf_uid"]:
+            out[c] = 0
+        out["ebpf_comm"] = ""
         out.to_csv(args.out, index=False)
-        print(f"[!] No eBPF data. Wrote Zeek-only: {args.out}")
+        print(f"[!] Wrote Zeek-only output: {args.out}")
         return
+    
+    print(f"[*] Loaded {len(e)} eBPF flows")
 
-    # Build forward/reverse keyed views WITHOUT destroying Zeek's original columns.
-    z_fwd = z.copy()
-    z_fwd["saddr_u32"] = z_fwd["orig_ip_u32"].astype("uint32")
-    z_fwd["daddr_u32"] = z_fwd["resp_ip_u32"].astype("uint32")
-    z_fwd["sport"] = z_fwd["orig_p"].astype(int)
-    z_fwd["dport"] = z_fwd["resp_p"].astype(int)
-    z_fwd["proto_key"] = z_fwd["proto_num"].astype(int)
+    # Create matching keys
+    print("[*] Creating flow keys...")
+    z_fwd = create_flow_keys(z, orig_to_src=True)
+    z_rev = create_flow_keys(z, orig_to_src=False)
+    e_keyed = create_ebpf_keys(e)
 
-    z_rev = z.copy()
-    z_rev["saddr_u32"] = z_rev["resp_ip_u32"].astype("uint32")
-    z_rev["daddr_u32"] = z_rev["orig_ip_u32"].astype("uint32")
-    z_rev["sport"] = z_rev["resp_p"].astype(int)
-    z_rev["dport"] = z_rev["orig_p"].astype(int)
-    z_rev["proto_key"] = z_rev["proto_num"].astype(int)
-
-    # Normalise keys WITHOUT overwriting Zeek's string proto column.
-    z_fwd = normalize_key_cols(
-        z_fwd,
-        saddr_col="saddr_u32",
-        daddr_col="daddr_u32",
-        sport_col="sport",
-        dport_col="dport",
-        proto_col="proto_key",
-    )
-    z_rev = normalize_key_cols(
-        z_rev,
-        saddr_col="saddr_u32",
-        daddr_col="daddr_u32",
-        sport_col="sport",
-        dport_col="dport",
-        proto_col="proto_key",
-    )
-    e = normalize_key_cols(
-        e,
-        saddr_col="saddr_u32",
-        daddr_col="daddr_u32",
-        sport_col="sport",
-        dport_col="dport",
-        proto_col="proto",
-    )
-
+    # Try forward direction first
+    print("[*] Matching flows (forward direction)...")
     merged_fwd = z_fwd.merge(
-        e,
+        e_keyed,
         on=["k_saddr","k_daddr","k_sport","k_dport","k_proto"],
         how="left",
         suffixes=("", "_e"),
     )
+
+    # Try reverse direction for unmatched flows
+    print("[*] Matching flows (reverse direction)...")
     merged_rev = z_rev.merge(
-        e,
+        e_keyed,
         on=["k_saddr","k_daddr","k_sport","k_dport","k_proto"],
         how="left",
         suffixes=("", "_e"),
     )
 
+    # Combine: prefer forward, use reverse for unmatched
     merged = merged_fwd.copy()
-    choose_rev = merged["first_ts_s"].isna() & merged_rev["first_ts_s"].notna()
-    merged.loc[choose_rev, merged.columns] = merged_rev.loc[choose_rev, merged.columns]
+    unmatched_fwd = merged["first_ts_s"].isna()
+    matched_rev = merged_rev["first_ts_s"].notna()
+    use_reverse = unmatched_fwd & matched_rev
+    
+    if use_reverse.any():
+        print(f"[*] Using reverse direction for {use_reverse.sum()} flows")
+        merged.loc[use_reverse, merged.columns] = merged_rev.loc[use_reverse, merged.columns]
 
-    has = merged["first_ts_s"].notna()
-    ok = (
-        ~has |
-        ((merged["first_ts_s"] <= merged["end_ts"] + args.time_slop) &
-         (merged["last_ts_s"]  >= merged["start_ts"] - args.time_slop))
-    )
-    merged = merged[ok].copy()
+    # Apply time window filter
+    has_ebpf = merged["first_ts_s"].notna()
+    if has_ebpf.any():
+        print(f"[*] Applying time window filter (±{args.time_slop}s)...")
+        
+        # Check if eBPF time overlaps with Zeek time window
+        time_ok = (
+            (merged["first_ts_s"] <= merged["end_ts"] + args.time_slop) &
+            (merged["last_ts_s"]  >= merged["start_ts"] - args.time_slop)
+        )
+        
+        # Only filter flows that have eBPF data
+        valid = ~has_ebpf | time_ok
+        filtered_out = (~valid).sum()
+        
+        if filtered_out > 0:
+            print(f"[*] Filtered out {filtered_out} flows due to time mismatch")
+            if args.debug:
+                mismatched = merged[~valid][["orig_h","resp_h","orig_p","resp_p","proto",
+                                              "start_ts","end_ts","first_ts_s","last_ts_s"]].head(10)
+                print("[DEBUG] Sample time mismatches:")
+                print(mismatched.to_string())
+        
+        merged = merged[valid].copy()
 
+    # Helper function for safe column access
     def col(df, name, default):
-        """Return column as Series if present, else a default-valued Series aligned to df."""
         if name in df.columns:
             return df[name]
-        import pandas as pd
         return pd.Series([default] * len(df), index=df.index)
 
+    # Create output columns
     merged["ebpf_bytes_sent"] = col(merged, "bytes_sent", 0).fillna(0).astype(float)
     merged["ebpf_bytes_recv"] = col(merged, "bytes_recv", 0).fillna(0).astype(float)
     merged["ebpf_retransmits"] = col(merged, "retransmits", 0).fillna(0).astype(float)
     merged["ebpf_state_changes"] = col(merged, "state_changes", 0).fillna(0).astype(float)
     merged["ebpf_samples"] = col(merged, "samples", 0).fillna(0).astype(float)
 
-    # Process context (mode of last-seen process for the flow)
+    # Process context
     merged["ebpf_pid"] = col(merged, "pid_mode", 0).fillna(0).astype(int)
     merged["ebpf_uid"] = col(merged, "uid_mode", 0).fillna(0).astype(int)
     merged["ebpf_comm"] = col(merged, "comm_mode", "").fillna("").astype(str)
 
-    # Optional run metadata (tcpreplay, interface, etc.)
+    # Add run metadata if provided
     run_meta_cols = []
-    if args.run_meta:
+    if args.run_meta and os.path.exists(args.run_meta):
         try:
             with open(args.run_meta, "r") as f:
                 meta = json.load(f)
             flat = flatten_meta(meta)
             for k, v in flat.items():
-                col = "run_" + str(k)
-                merged[col] = v
-                run_meta_cols.append(col)
-        except FileNotFoundError:
-            print(f"[!] --run_meta not found: {args.run_meta} (skipping)")
+                col_name = "run_" + str(k)
+                merged[col_name] = v
+                run_meta_cols.append(col_name)
+            print(f"[*] Added {len(run_meta_cols)} metadata columns")
         except Exception as ex:
-            print(f"[!] Failed to read --run_meta {args.run_meta}: {ex} (skipping)")
+            print(f"[!] Failed to read run metadata: {ex}")
 
+    # Select output columns
     out_cols = [
         "ts","duration","orig_h","resp_h","orig_p","resp_p","proto","conn_state",
         "orig_bytes","resp_bytes","orig_pkts","resp_pkts",
         "start_ts","end_ts",
-        "ebpf_bytes_sent","ebpf_bytes_recv","ebpf_retransmits","ebpf_state_changes","ebpf_samples",
+        "ebpf_bytes_sent","ebpf_bytes_recv","ebpf_retransmits",
+        "ebpf_state_changes","ebpf_samples",
         "ebpf_pid","ebpf_uid","ebpf_comm",
     ]
     out_cols.extend(run_meta_cols)
+
+    # Write output
     merged[out_cols].to_csv(args.out, index=False)
-    print(f"[*] Wrote enriched flows: {args.out}")
-    print(f"[*] Enriched matches: {int(has.sum())}/{len(merged)}")
+    
+    # Calculate statistics
+    total_flows = len(merged)
+    enriched_flows = int(has_ebpf.sum())
+    enrichment_rate = (enriched_flows / total_flows * 100) if total_flows > 0 else 0
+    
+    print(f"\n[*] MERGE COMPLETE")
+    print(f"[*] Total flows: {total_flows}")
+    print(f"[*] Enriched with eBPF: {enriched_flows} ({enrichment_rate:.1f}%)")
+    print(f"[*] Output written to: {args.out}")
+    
+    # Debug statistics
+    if args.debug and has_ebpf.any():
+        print("\n[DEBUG] eBPF enrichment statistics:")
+        print(f"  - Flows with process context: {(merged['ebpf_pid'] > 0).sum()}")
+        print(f"  - Flows with bytes_sent: {(merged['ebpf_bytes_sent'] > 0).sum()}")
+        print(f"  - Flows with retransmits: {(merged['ebpf_retransmits'] > 0).sum()}")
+        print(f"  - Sample enriched flows:")
+        sample = merged[has_ebpf][["orig_h","resp_h","orig_p","resp_p","proto",
+                                    "ebpf_bytes_sent","ebpf_pid","ebpf_comm"]].head(5)
+        print(sample.to_string())
 
 if __name__ == "__main__":
     main()
