@@ -1,13 +1,4 @@
 #!/usr/bin/env python3
-"""
-Improved merge script for Zeek and eBPF data.
-
-Key improvements:
-1. Removed byte order variant handling (now handled correctly in Go collector)
-2. Better logging and diagnostics
-3. More flexible time window matching
-4. Improved debugging output
-"""
 import argparse
 import json
 import os
@@ -135,6 +126,52 @@ def load_ebpf_agg(jsonl: str) -> pd.DataFrame:
     
     return df
 
+def synchronize_timestamps(zeek_df: pd.DataFrame, ebpf_df: pd.DataFrame, debug: bool = False):
+    """
+    Align eBPF timestamps with PCAP timeline.
+    
+    During replay:
+    - Zeek uses original PCAP timestamps (e.g., July 2017)
+    - eBPF uses current wall-clock time (e.g., Feb 2026)
+    
+    We calculate the offset and adjust eBPF timestamps to match PCAP timeline.
+    """
+    if ebpf_df.empty or zeek_df.empty:
+        return ebpf_df
+    
+    # Calculate time offset
+    zeek_min = zeek_df['start_ts'].min()
+    zeek_max = zeek_df['end_ts'].max()
+    ebpf_min = ebpf_df['first_ts_s'].min()
+    ebpf_max = ebpf_df['last_ts_s'].max()
+    
+    # Time offset = difference between when flows started
+    offset = zeek_min - ebpf_min
+    
+    if debug:
+        print(f"\n[DEBUG] Timestamp synchronization:")
+        print(f"  Zeek timeline:  {zeek_min:.1f} to {zeek_max:.1f} (span: {zeek_max-zeek_min:.1f}s)")
+        print(f"  eBPF timeline:  {ebpf_min:.1f} to {ebpf_max:.1f} (span: {ebpf_max-ebpf_min:.1f}s)")
+        print(f"  Offset needed:  {offset:.1f}s ({offset/86400:.1f} days)")
+        
+        from datetime import datetime
+        print(f"  Zeek start:     {datetime.fromtimestamp(zeek_min).strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"  eBPF start:     {datetime.fromtimestamp(ebpf_min).strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"  After adjust:   {datetime.fromtimestamp(ebpf_min + offset).strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # Apply offset to align timelines
+    ebpf_df = ebpf_df.copy()
+    ebpf_df['first_ts_s'] = ebpf_df['first_ts_s'] + offset
+    ebpf_df['last_ts_s'] = ebpf_df['last_ts_s'] + offset
+    
+    if debug:
+        new_min = ebpf_df['first_ts_s'].min()
+        new_max = ebpf_df['last_ts_s'].max()
+        print(f"  Adjusted eBPF:  {new_min:.1f} to {new_max:.1f}")
+        print(f"  Alignment error: {abs(zeek_min - new_min):.3f}s")
+    
+    return ebpf_df
+
 def create_flow_keys(df: pd.DataFrame, orig_to_src: bool = True) -> pd.DataFrame:
     """Create standardized flow keys for matching"""
     out = df.copy()
@@ -167,7 +204,7 @@ def create_ebpf_keys(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 def main():
-    ap = argparse.ArgumentParser(description="Merge Zeek and eBPF flow data")
+    ap = argparse.ArgumentParser(description="Merge Zeek and eBPF flow data with timestamp sync")
     ap.add_argument("--zeek_conn", required=True, help="Zeek conn.csv file")
     ap.add_argument("--ebpf_agg", required=True, help="eBPF aggregated JSONL file")
     ap.add_argument("--out", required=True, help="Output merged CSV file")
@@ -179,7 +216,7 @@ def main():
                     help="Enable debug output")
     args = ap.parse_args()
 
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
 
     print("[*] Loading Zeek connection log...")
     z = load_zeek_conn(args.zeek_conn)
@@ -203,13 +240,17 @@ def main():
     
     print(f"[*] Loaded {len(e)} eBPF flows")
 
+    # Synchronize timestamps
+    print("[*] Synchronizing timestamps...")
+    e = synchronize_timestamps(z, e, debug=args.debug)
+
     # Create matching keys
     print("[*] Creating flow keys...")
     z_fwd = create_flow_keys(z, orig_to_src=True)
     z_rev = create_flow_keys(z, orig_to_src=False)
     e_keyed = create_ebpf_keys(e)
 
-    # Try forward direction first
+    # Match flows
     print("[*] Matching flows (forward direction)...")
     merged_fwd = z_fwd.merge(
         e_keyed,
@@ -254,7 +295,7 @@ def main():
         
         if filtered_out > 0:
             print(f"[*] Filtered out {filtered_out} flows due to time mismatch")
-            if args.debug:
+            if args.debug and filtered_out < 100:
                 mismatched = merged[~valid][["orig_h","resp_h","orig_p","resp_p","proto",
                                               "start_ts","end_ts","first_ts_s","last_ts_s"]].head(10)
                 print("[DEBUG] Sample time mismatches:")
@@ -280,7 +321,7 @@ def main():
     merged["ebpf_uid"] = col(merged, "uid_mode", 0).fillna(0).astype(int)
     merged["ebpf_comm"] = col(merged, "comm_mode", "").fillna("").astype(str)
 
-    # Add run metadata if provided
+    # Add run metadata
     run_meta_cols = []
     if args.run_meta and os.path.exists(args.run_meta):
         try:
@@ -314,21 +355,27 @@ def main():
     enriched_flows = int(has_ebpf.sum())
     enrichment_rate = (enriched_flows / total_flows * 100) if total_flows > 0 else 0
     
+    flows_with_data = int((merged['ebpf_bytes_sent'] > 0).sum())
+    data_rate = (flows_with_data / total_flows * 100) if total_flows > 0 else 0
+    
     print(f"\n[*] MERGE COMPLETE")
-    print(f"[*] Total flows: {total_flows}")
-    print(f"[*] Enriched with eBPF: {enriched_flows} ({enrichment_rate:.1f}%)")
+    print(f"[*] Total flows: {total_flows:,}")
+    print(f"[*] Enriched with eBPF: {enriched_flows:,} ({enrichment_rate:.1f}%)")
+    print(f"[*] Flows with packet data: {flows_with_data:,} ({data_rate:.1f}%)")
     print(f"[*] Output written to: {args.out}")
     
     # Debug statistics
-    if args.debug and has_ebpf.any():
+    if args.debug and flows_with_data > 0:
         print("\n[DEBUG] eBPF enrichment statistics:")
-        print(f"  - Flows with process context: {(merged['ebpf_pid'] > 0).sum()}")
-        print(f"  - Flows with bytes_sent: {(merged['ebpf_bytes_sent'] > 0).sum()}")
-        print(f"  - Flows with retransmits: {(merged['ebpf_retransmits'] > 0).sum()}")
-        print(f"  - Sample enriched flows:")
-        sample = merged[has_ebpf][["orig_h","resp_h","orig_p","resp_p","proto",
-                                    "ebpf_bytes_sent","ebpf_pid","ebpf_comm"]].head(5)
-        print(sample.to_string())
+        print(f"  - Flows with bytes_sent > 0: {flows_with_data:,}")
+        print(f"  - Flows with retransmits: {(merged['ebpf_retransmits'] > 0).sum():,}")
+        print(f"  - Total bytes captured: {merged['ebpf_bytes_sent'].sum() + merged['ebpf_bytes_recv'].sum():,.0f}")
+        
+        sample = merged[merged['ebpf_bytes_sent'] > 0][["orig_h","resp_h","orig_p","resp_p","proto",
+                                                          "ebpf_bytes_sent","ebpf_samples"]].head(5)
+        if len(sample) > 0:
+            print(f"\n  Sample enriched flows:")
+            print("  " + sample.to_string().replace("\n", "\n  "))
 
 if __name__ == "__main__":
     main()
