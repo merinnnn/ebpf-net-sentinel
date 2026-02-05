@@ -13,7 +13,7 @@ This repo gives you a repeatable pipeline to:
 
 **OS**: Ubuntu 20.04+ (tested on 20.04)
 
-**Must have**
+**Must have**:
 
 * Root/sudo access (loading eBPF programs + tcpreplay)
 * Linux kernel with eBPF support
@@ -30,6 +30,30 @@ bash ubuntu/setup.sh
 
 ---
 
+## Data directory structure
+
+```bash
+data
+├── cicids2017_csv
+│   └── MachineLearningCSV
+│       ├── Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv
+│       ├── Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv
+│       ├── Friday-WorkingHours-Morning.pcap_ISCX.csv
+│       ├── Monday-WorkingHours.pcap_ISCX.csv
+│       ├── Thursday-WorkingHours-Afternoon-Infilteration.pcap_ISCX.csv
+│       ├── Thursday-WorkingHours-Morning-WebAttacks.pcap_ISCX.csv
+│       ├── Tuesday-WorkingHours.pcap_ISCX.csv
+│       └── Wednesday-workingHours.pcap_ISCX.csv
+└── cicids2017_pcap
+    ├── Friday-WorkingHours.pcap
+    ├── Monday-WorkingHours.pcap
+    ├── Thursday-WorkingHours.pcap
+    ├── Tuesday-WorkingHours.pcap
+    └── Wednesday-WorkingHours.pcap
+```
+
+---
+
 ## Commands
 
 ### 1) Create a veth pair (recommended for safe replay)
@@ -38,6 +62,7 @@ bash ubuntu/setup.sh
 Packets sent into `veth0` appear as received packets on `veth1` (and vice-versa).
 
 **Manual:**
+
 ```bash
 sudo ip link add veth0 type veth peer name veth1
 sudo ip link set veth0 up
@@ -45,6 +70,7 @@ sudo ip link set veth1 up
 ```
 
 **Automatic:**
+
 ```bash
 sudo bash ubuntu/setup_veth.sh veth0 veth1 9000
 ```
@@ -62,7 +88,7 @@ You should see both interfaces in `state UP`. If you used the helper with `9000`
 
 ### 2) Offline run: Zeek + netmon + tcpreplay (single PCAP)
 
-**What it does**
+**What it does**:
 
 * Runs Zeek over the PCAP -> `zeek/conn.log` + `zeek/conn.csv`
 * Starts the eBPF collector (`netmon`) and attaches the socket filter to **REPLAY_IFACE**
@@ -83,11 +109,12 @@ Notes:
 * The capture interface is the second argument (`veth1` above). The eBPF socket filter attaches to `REPLAY_IFACE`.
 * The capture script may preprocess PCAPs to avoid MTU/jumbo frame issues (e.g. via `editcap`).
 * If you change eBPF/Go code or see unexpected netmon failures, rebuild cleanly:
+
   ```bash
   REPLAY_IFACE=veth0 SET_MTU=9000 FORCE_BUILD=1 bash ubuntu/run_capture.sh Monday-WorkingHours.pcap veth1 10
   ```
 
-**Expected output**
+**Expected output**:
 
 The script prints a run folder like:
 
@@ -106,23 +133,7 @@ Inside that folder you should see (names may vary slightly):
 
 ---
 
-### 3) Offline Zeek extraction only
-
-**What it does**: runs Zeek over a PCAP and converts `conn.log` to `conn.csv`.
-
-```bash
-bash ubuntu/zeek_extract.sh Monday-WorkingHours.pcap data/tmp_zeek
-```
-
-**Expected output**:
-
-* `data/tmp_zeek/conn.log`
-* `data/tmp_zeek/conn.csv`
-* `data/tmp_zeek/zeek_extract.log`
-
----
-
-### 4) Live capture: Zeek + netmon on a real interface
+### 3) Live capture: Zeek + netmon on a real interface
 
 **What it does**: starts Zeek and the eBPF collector on a real interface until you press **Ctrl+C**.
 
@@ -138,7 +149,7 @@ sudo bash ubuntu/run_live.sh eth0
 
 ---
 
-### 5) Merge Zeek + eBPF features into one dataset
+### 4) Merge Zeek + eBPF features into one dataset
 
 **What it does**: joins Zeek flow rows with eBPF aggregated rows using a 5-tuple key
 (src/dst IP, src/dst port, protocol). IPv6 rows are dropped (collector is IPv4-oriented).
@@ -153,13 +164,42 @@ python3 ubuntu/merge_zeek_ebpf.py \
 ```
 
 (Optional debug)
+
 ```bash
 python3 ubuntu/merge_zeek_ebpf.py ... --debug
 ```
 
-**Expected output**
+**Expected output**:
 
 The script prints merge stats and writes the merged dataset to your `--out` path.
+
+---
+
+### 5) Run all commands
+
+**What it does**: runs run_capture.sh and merge_zeek_ebpf.py for all PCAPs.
+
+```bash
+for DAY in Monday Tuesday Wednesday Thursday Friday; do
+  echo "Processing $DAY..."
+
+  if ! REPLAY_IFACE=veth0 bash ubuntu/run_capture.sh "${DAY}-WorkingHours.pcap" veth1 100; then
+    echo "[!] capture failed for $DAY, skipping merge"
+    continue
+  fi
+
+  RUN="$(ls -1dt data/runs/* | head -n 1)"
+  python3 ubuntu/merge_zeek_ebpf.py \
+    --zeek_conn "$RUN/zeek/conn.csv" \
+    --ebpf_agg  "$RUN/ebpf_agg.jsonl" \
+    --out       "$RUN/merged.csv" \
+    --time_slop 5
+done
+```
+
+**Expected output**:
+
+The result of this script will be saved in 5 different directories under date/runs (one directory for each PCAP parsed)
 
 ---
 
