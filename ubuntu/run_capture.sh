@@ -111,24 +111,33 @@ EOF
 stop_netmon() {
   local pid="${1:-}"
   [[ -z "$pid" ]] && return 0
+  if ! sudo kill -0 "$pid" 2>/dev/null; then return 0; fi
 
-  if ! sudo kill -0 "$pid" 2>/dev/null; then
-    return 0
+  local pgid
+  pgid="$(sudo ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
+
+  echo "[*] Stopping netmon pid=$pid pgid=${pgid:-?}"
+
+  if [[ -n "${pgid:-}" ]]; then
+    sudo kill -TERM -- "-$pgid" 2>/dev/null || true
+  else
+    sudo kill -TERM "$pid" 2>/dev/null || true
   fi
-
-  echo "[*] Stopping netmon group -$pid"
-  sudo kill -TERM -- "-$pid" 2>/dev/null || true
 
   for _ in {1..10}; do
     if ! sudo kill -0 "$pid" 2>/dev/null; then
-      echo "[*] netmon group stopped"
+      echo "[*] netmon stopped"
       return 0
     fi
     sleep 0.5
   done
 
-  echo "[!] netmon group still alive; SIGKILL"
-  sudo kill -KILL -- "-$pid" 2>/dev/null || true
+  echo "[!] netmon still alive; SIGKILL"
+  if [[ -n "${pgid:-}" ]]; then
+    sudo kill -KILL -- "-$pgid" 2>/dev/null || true
+  else
+    sudo kill -KILL "$pid" 2>/dev/null || true
+  fi
 }
 
 cleanup() {
@@ -228,7 +237,7 @@ sudo bash -c '
   ulimit -l unlimited || true
   exec >>"$1" 2>&1
   shift
-  "$@" &
+  setsid "$@" </dev/null & # start netmon in a new session -> PID becomes PGID
   echo $! >"$0"
 ' "$NETMON_PIDFILE" "$NETMON_LOG" "$NETMON_BIN" "${START_ARGS[@]}"
 
