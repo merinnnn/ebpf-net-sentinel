@@ -102,14 +102,32 @@ EOF
   fi
 }
 
+stop_netmon() {
+  local pid="${1:-}"
+  [[ -z "$pid" ]] && return 0
+
+  if ! sudo kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+
+  echo "[*] Stopping netmon group -$pid"
+  sudo kill -TERM -- "-$pid" 2>/dev/null || true
+
+  for _ in {1..10}; do
+    if ! sudo kill -0 "$pid" 2>/dev/null; then
+      echo "[*] netmon group stopped"
+      return 0
+    fi
+    sleep 0.5
+  done
+
+  echo "[!] netmon group still alive; SIGKILL"
+  sudo kill -KILL -- "-$pid" 2>/dev/null || true
+}
+
 cleanup() {
   local rc=$?
-  if [[ -n "${NETMON_PID:-}" ]]; then
-    if sudo kill -0 "$NETMON_PID" 2>/dev/null; then
-      sudo kill -INT "$NETMON_PID" 2>/dev/null || true
-      sleep 1
-    fi
-  fi
+  stop_netmon "${NETMON_PID:-}"
   write_fallback_meta
   sudo chown -R "$(id -u):$(id -g)" "$RUN_DIR" 2>/dev/null || true
   exit $rc
@@ -239,10 +257,7 @@ echo "[*] [6/6] Waiting $((FLUSH_SECS + 2))s to allow netmon to flush..."
 sleep "$((FLUSH_SECS + 2))"
 
 echo "[*] Stop netmon (final flush)"
-if sudo kill -0 "$NETMON_PID" 2>/dev/null; then
-  sudo kill -INT "$NETMON_PID" 2>/dev/null || true
-  sleep 2
-fi
+stop_netmon "$NETMON_PID"
 
 write_fallback_meta
 sudo chown -R "$(id -u):$(id -g)" "$RUN_DIR" 2>/dev/null || true
