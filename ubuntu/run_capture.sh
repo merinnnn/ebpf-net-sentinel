@@ -87,6 +87,12 @@ echo ""
 
 NETMON_PID=""
 
+if pgrep -x netmon >/dev/null; then
+  echo "[x] netmon already running; refusing to start another."
+  pgrep -a netmon
+  exit 1
+fi
+
 write_fallback_meta() {
   if [[ ! -f "$RUN_META" ]]; then
     cat >"$RUN_META" <<EOF
