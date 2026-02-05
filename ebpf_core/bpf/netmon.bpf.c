@@ -80,7 +80,7 @@ struct {
 
 struct {
   __uint(type, BPF_MAP_TYPE_LRU_HASH);
-  __uint(max_entries, 262144);
+  __uint(max_entries, 2097152);  // 2M entries
   __type(key, struct flow_key);
   __type(value, struct flow_val);
 } flows SEC(".maps");
