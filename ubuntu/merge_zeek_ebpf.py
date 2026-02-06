@@ -5,6 +5,7 @@ import os
 import ipaddress
 import pandas as pd
 import sys
+from collections import defaultdict
 
 def ip_to_u32_maybe(ip: str):
     """Convert IP string to uint32, return NA for IPv6"""
@@ -79,7 +80,7 @@ def load_zeek_conn(conn_csv: str) -> pd.DataFrame:
     return df
 
 def load_ebpf_agg(jsonl: str) -> pd.DataFrame:
-    """Load eBPF aggregated flow data (now with correct byte order from Go)"""
+    """Load eBPF aggregated flow data"""
     rows = []
     with open(jsonl, "r") as f:
         for line in f:
@@ -112,7 +113,7 @@ def load_ebpf_agg(jsonl: str) -> pd.DataFrame:
     df["dport"] = pd.to_numeric(df["dport"], errors="coerce").fillna(0).astype(int)
     df["proto"] = pd.to_numeric(df["proto"], errors="coerce").fillna(0).astype(int)
     
-    # Ensure we have timestamp columns
+    # Handle timestamp conversion
     if "first_ts_s" not in df.columns and "first_ts_ns" in df.columns:
         if "flush_ts_s" in df.columns and "last_ts_ns" in df.columns:
             # Calculate epoch timestamps from monotonic
@@ -126,16 +127,53 @@ def load_ebpf_agg(jsonl: str) -> pd.DataFrame:
     
     return df
 
+def detect_replay_scenario(zeek_df: pd.DataFrame, ebpf_df: pd.DataFrame, debug: bool = False):
+    """
+    Detect if this is a PCAP replay scenario based on time compression.
+    
+    Returns:
+        tuple: (is_replay, compression_ratio, replay_type)
+            is_replay: bool
+            compression_ratio: float (zeek_span / ebpf_span)
+            replay_type: str ('topspeed', 'fast', 'moderate', 'realtime', 'live')
+    """
+    zeek_span = zeek_df['end_ts'].max() - zeek_df['start_ts'].min()
+    ebpf_span = ebpf_df['last_ts_s'].max() - ebpf_df['first_ts_s'].min()
+    
+    # Avoid division by zero
+    if ebpf_span < 1.0:
+        ebpf_span = 1.0
+    
+    compression = zeek_span / ebpf_span
+    
+    # Classify scenario
+    if compression > 500:
+        replay_type = 'topspeed'
+        is_replay = True
+    elif compression > 100:
+        replay_type = 'fast'
+        is_replay = True
+    elif compression > 10:
+        replay_type = 'moderate'
+        is_replay = True
+    elif compression > 2:
+        replay_type = 'realtime'
+        is_replay = True
+    else:
+        replay_type = 'live'
+        is_replay = False
+    
+    if debug:
+        print(f"\n[DEBUG] Replay detection:")
+        print(f"  Zeek time span:    {zeek_span:.1f}s ({zeek_span/3600:.1f} hours)")
+        print(f"  eBPF capture span: {ebpf_span:.1f}s ({ebpf_span/60:.1f} minutes)")
+        print(f"  Compression ratio: {compression:.1f}x")
+        print(f"  Scenario: {replay_type.upper()} {'(REPLAY)' if is_replay else '(LIVE)'}")
+    
+    return is_replay, compression, replay_type
+
 def synchronize_timestamps(zeek_df: pd.DataFrame, ebpf_df: pd.DataFrame, debug: bool = False):
-    """
-    Align eBPF timestamps with PCAP timeline.
-    
-    During replay:
-    - Zeek uses original PCAP timestamps (e.g., July 2017)
-    - eBPF uses current wall-clock time (e.g., Feb 2026)
-    
-    We calculate the offset and adjust eBPF timestamps to match PCAP timeline.
-    """
+    """Align eBPF timestamps with PCAP timeline"""
     if ebpf_df.empty or zeek_df.empty:
         return ebpf_df
     
@@ -149,12 +187,11 @@ def synchronize_timestamps(zeek_df: pd.DataFrame, ebpf_df: pd.DataFrame, debug: 
     offset = zeek_min - ebpf_min
     
     if debug:
+        from datetime import datetime
         print(f"\n[DEBUG] Timestamp synchronization:")
         print(f"  Zeek timeline:  {zeek_min:.1f} to {zeek_max:.1f} (span: {zeek_max-zeek_min:.1f}s)")
         print(f"  eBPF timeline:  {ebpf_min:.1f} to {ebpf_max:.1f} (span: {ebpf_max-ebpf_min:.1f}s)")
         print(f"  Offset needed:  {offset:.1f}s ({offset/86400:.1f} days)")
-        
-        from datetime import datetime
         print(f"  Zeek start:     {datetime.fromtimestamp(zeek_min).strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"  eBPF start:     {datetime.fromtimestamp(ebpf_min).strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"  After adjust:   {datetime.fromtimestamp(ebpf_min + offset).strftime('%Y-%m-%d %H:%M:%S')}")
@@ -172,48 +209,207 @@ def synchronize_timestamps(zeek_df: pd.DataFrame, ebpf_df: pd.DataFrame, debug: 
     
     return ebpf_df
 
-def create_flow_keys(df: pd.DataFrame, orig_to_src: bool = True) -> pd.DataFrame:
-    """Create standardized flow keys for matching"""
-    out = df.copy()
+def match_flows_with_deduplication(zeek_df: pd.DataFrame, ebpf_df: pd.DataFrame, 
+                                   is_replay: bool, debug: bool = False):
+    """
+    Match flows with intelligent duplicate handling.
     
-    if orig_to_src:
-        # Forward direction: orig -> src
-        out["k_saddr"] = out["orig_ip_u32"].astype("uint32")
-        out["k_daddr"] = out["resp_ip_u32"].astype("uint32")
-        out["k_sport"] = out["orig_p"].astype(int)
-        out["k_dport"] = out["resp_p"].astype(int)
-        out["k_proto"] = out["proto_num"].astype(int)
+    For replay scenarios: Uses one-to-one matching to prevent duplicate 5-tuple issues.
+    For live capture: Uses standard merge with time window filtering.
+    """
+    # Create 5-tuple keys
+    zeek_df = zeek_df.copy()
+    ebpf_df = ebpf_df.copy()
+    
+    # Forward direction keys
+    zeek_df["key_fwd"] = (
+        zeek_df["orig_ip_u32"].astype(str) + "_" +
+        zeek_df["resp_ip_u32"].astype(str) + "_" +
+        zeek_df["orig_p"].astype(str) + "_" +
+        zeek_df["resp_p"].astype(str) + "_" +
+        zeek_df["proto_num"].astype(str)
+    )
+    
+    # Reverse direction keys
+    zeek_df["key_rev"] = (
+        zeek_df["resp_ip_u32"].astype(str) + "_" +
+        zeek_df["orig_ip_u32"].astype(str) + "_" +
+        zeek_df["resp_p"].astype(str) + "_" +
+        zeek_df["orig_p"].astype(str) + "_" +
+        zeek_df["proto_num"].astype(str)
+    )
+    
+    ebpf_df["key"] = (
+        ebpf_df["saddr_u32"].astype(str) + "_" +
+        ebpf_df["daddr_u32"].astype(str) + "_" +
+        ebpf_df["sport"].astype(str) + "_" +
+        ebpf_df["dport"].astype(str) + "_" +
+        ebpf_df["proto"].astype(str)
+    )
+    
+    if is_replay:
+        # Replay mode: One-to-one matching to handle duplicates correctly
+        print("[*] Using replay-aware matching (prevents duplicate 5-tuple issues)...")
+        
+        # Build eBPF lookup dict (key -> first occurrence)
+        ebpf_lookup = {}
+        for idx, row in ebpf_df.iterrows():
+            key = row['key']
+            if key not in ebpf_lookup:
+                ebpf_lookup[key] = row
+        
+        if debug:
+            dup_keys = len(ebpf_df) - len(ebpf_lookup)
+            if dup_keys > 0:
+                print(f"[DEBUG] Found {dup_keys} duplicate 5-tuples in eBPF (using first occurrence)")
+        
+        # Match Zeek flows to eBPF
+        matched_data = []
+        stats = {'fwd': 0, 'rev': 0, 'unmatched': 0}
+        
+        for idx, zrow in zeek_df.iterrows():
+            ebpf_match = None
+            direction = None
+            
+            # Try forward match
+            if zrow['key_fwd'] in ebpf_lookup:
+                ebpf_match = ebpf_lookup[zrow['key_fwd']]
+                direction = 'forward'
+                stats['fwd'] += 1
+            # Try reverse match
+            elif zrow['key_rev'] in ebpf_lookup:
+                ebpf_match = ebpf_lookup[zrow['key_rev']]
+                direction = 'reverse'
+                stats['rev'] += 1
+            else:
+                stats['unmatched'] += 1
+            
+            # Combine Zeek and eBPF data
+            combined = zrow.to_dict()
+            if ebpf_match is not None:
+                for k, v in ebpf_match.items():
+                    if k not in ['key']:  # Don't copy the key itself
+                        combined[f'ebpf_{k}'] = v
+            
+            matched_data.append(combined)
+        
+        merged = pd.DataFrame(matched_data)
+        
+        print(f"[*] Matched: {stats['fwd']} forward, {stats['rev']} reverse, {stats['unmatched']} unmatched")
+        
     else:
-        # Reverse direction: resp -> src
-        out["k_saddr"] = out["resp_ip_u32"].astype("uint32")
-        out["k_daddr"] = out["orig_ip_u32"].astype("uint32")
-        out["k_sport"] = out["resp_p"].astype(int)
-        out["k_dport"] = out["orig_p"].astype(int)
-        out["k_proto"] = out["proto_num"].astype(int)
+        # Live mode: Standard pandas merge
+        print("[*] Using standard merge (live capture mode)...")
+        
+        zeek_fwd = zeek_df.copy()
+        zeek_fwd['k_saddr'] = zeek_fwd['orig_ip_u32']
+        zeek_fwd['k_daddr'] = zeek_fwd['resp_ip_u32']
+        zeek_fwd['k_sport'] = zeek_fwd['orig_p']
+        zeek_fwd['k_dport'] = zeek_fwd['resp_p']
+        zeek_fwd['k_proto'] = zeek_fwd['proto_num']
+        
+        zeek_rev = zeek_df.copy()
+        zeek_rev['k_saddr'] = zeek_rev['resp_ip_u32']
+        zeek_rev['k_daddr'] = zeek_rev['orig_ip_u32']
+        zeek_rev['k_sport'] = zeek_rev['resp_p']
+        zeek_rev['k_dport'] = zeek_rev['orig_p']
+        zeek_rev['k_proto'] = zeek_rev['proto_num']
+        
+        ebpf_keyed = ebpf_df.copy()
+        ebpf_keyed['k_saddr'] = ebpf_keyed['saddr_u32']
+        ebpf_keyed['k_daddr'] = ebpf_keyed['daddr_u32']
+        ebpf_keyed['k_sport'] = ebpf_keyed['sport']
+        ebpf_keyed['k_dport'] = ebpf_keyed['dport']
+        ebpf_keyed['k_proto'] = ebpf_keyed['proto']
+        
+        merged_fwd = zeek_fwd.merge(
+            ebpf_keyed,
+            on=["k_saddr","k_daddr","k_sport","k_dport","k_proto"],
+            how="left",
+            suffixes=("", "_ebpf")
+        )
+        
+        merged_rev = zeek_rev.merge(
+            ebpf_keyed,
+            on=["k_saddr","k_daddr","k_sport","k_dport","k_proto"],
+            how="left",
+            suffixes=("", "_ebpf")
+        )
+        
+        # Prefer forward, use reverse for unmatched
+        merged = merged_fwd.copy()
+        unmatched_fwd = merged["first_ts_s"].isna()
+        matched_rev = merged_rev["first_ts_s"].notna()
+        use_reverse = unmatched_fwd & matched_rev
+        
+        if use_reverse.any():
+            print(f"[*] Using reverse direction for {use_reverse.sum()} flows")
+            merged.loc[use_reverse, merged.columns] = merged_rev.loc[use_reverse, merged.columns]
     
-    return out
+    return merged
 
-def create_ebpf_keys(df: pd.DataFrame) -> pd.DataFrame:
-    """Create flow keys from eBPF data"""
-    out = df.copy()
-    out["k_saddr"] = out["saddr_u32"].astype("uint32")
-    out["k_daddr"] = out["daddr_u32"].astype("uint32")
-    out["k_sport"] = out["sport"].astype(int)
-    out["k_dport"] = out["dport"].astype(int)
-    out["k_proto"] = out["proto"].astype(int)
-    return out
+def apply_time_filter(merged: pd.DataFrame, time_slop: float, is_replay: bool, debug: bool = False):
+    """
+    Apply time window filter intelligently.
+    
+    For replay scenarios with high compression: Skip time filtering (use 5-tuple only).
+    For live/moderate replay: Apply standard time window filter.
+    """
+    # Detect if we have eBPF data
+    has_ebpf_col = 'first_ts_s' in merged.columns or 'ebpf_first_ts_s' in merged.columns
+    
+    if not has_ebpf_col:
+        return merged
+    
+    # Normalize column names
+    ts_col = 'ebpf_first_ts_s' if 'ebpf_first_ts_s' in merged.columns else 'first_ts_s'
+    ts_end_col = 'ebpf_last_ts_s' if 'ebpf_last_ts_s' in merged.columns else 'last_ts_s'
+    
+    has_ebpf = merged[ts_col].notna()
+    
+    if not has_ebpf.any():
+        return merged
+    
+    if is_replay:
+        # Replay mode: Skip time filter, rely on 5-tuple matching
+        print(f"[*] Skipping time filter (replay scenario - using 5-tuple matching only)")
+        if debug:
+            print(f"[DEBUG] In replay mode, time filtering would incorrectly reject valid matches")
+            print(f"[DEBUG] All matched flows retained based on 5-tuple")
+        return merged
+    else:
+        # Live mode: Apply time window filter
+        print(f"[*] Applying time window filter (±{time_slop}s)...")
+        
+        time_ok = (
+            (merged[ts_col] <= merged["end_ts"] + time_slop) &
+            (merged[ts_end_col] >= merged["start_ts"] - time_slop)
+        )
+        
+        valid = ~has_ebpf | time_ok
+        filtered_out = (~valid).sum()
+        
+        if filtered_out > 0:
+            print(f"[*] Filtered out {filtered_out} flows due to time mismatch")
+            if debug and filtered_out < 100:
+                mismatched = merged[~valid][["orig_h","resp_h","orig_p","resp_p","proto",
+                                              "start_ts","end_ts",ts_col,ts_end_col]].head(10)
+                print("[DEBUG] Sample time mismatches:")
+                print(mismatched.to_string())
+        
+        return merged[valid].copy()
 
 def main():
-    ap = argparse.ArgumentParser(description="Merge Zeek and eBPF flow data with timestamp sync")
+    ap = argparse.ArgumentParser(description="Bulletproof Zeek-eBPF merge with intelligent replay detection")
     ap.add_argument("--zeek_conn", required=True, help="Zeek conn.csv file")
     ap.add_argument("--ebpf_agg", required=True, help="eBPF aggregated JSONL file")
     ap.add_argument("--out", required=True, help="Output merged CSV file")
     ap.add_argument("--time_slop", type=float, default=5.0, 
-                    help="Time window tolerance in seconds (default: 5.0)")
-    ap.add_argument("--run_meta", default="",
-                    help="Optional run metadata JSON")
-    ap.add_argument("--debug", action="store_true",
-                    help="Enable debug output")
+                    help="Time window tolerance in seconds for live capture (default: 5.0)")
+    ap.add_argument("--run_meta", default="", help="Optional run metadata JSON")
+    ap.add_argument("--debug", action="store_true", help="Enable debug output")
+    ap.add_argument("--force_replay_mode", action="store_true",
+                    help="Force replay mode (skip time filter) even if auto-detection fails")
     args = ap.parse_args()
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
@@ -244,72 +440,30 @@ def main():
     print("[*] Synchronizing timestamps...")
     e = synchronize_timestamps(z, e, debug=args.debug)
 
-    # Create matching keys
-    print("[*] Creating flow keys...")
-    z_fwd = create_flow_keys(z, orig_to_src=True)
-    z_rev = create_flow_keys(z, orig_to_src=False)
-    e_keyed = create_ebpf_keys(e)
-
-    # Match flows
-    print("[*] Matching flows (forward direction)...")
-    merged_fwd = z_fwd.merge(
-        e_keyed,
-        on=["k_saddr","k_daddr","k_sport","k_dport","k_proto"],
-        how="left",
-        suffixes=("", "_e"),
-    )
-
-    # Try reverse direction for unmatched flows
-    print("[*] Matching flows (reverse direction)...")
-    merged_rev = z_rev.merge(
-        e_keyed,
-        on=["k_saddr","k_daddr","k_sport","k_dport","k_proto"],
-        how="left",
-        suffixes=("", "_e"),
-    )
-
-    # Combine: prefer forward, use reverse for unmatched
-    merged = merged_fwd.copy()
-    unmatched_fwd = merged["first_ts_s"].isna()
-    matched_rev = merged_rev["first_ts_s"].notna()
-    use_reverse = unmatched_fwd & matched_rev
+    # Detect replay scenario
+    is_replay, compression, replay_type = detect_replay_scenario(z, e, debug=args.debug)
     
-    if use_reverse.any():
-        print(f"[*] Using reverse direction for {use_reverse.sum()} flows")
-        merged.loc[use_reverse, merged.columns] = merged_rev.loc[use_reverse, merged.columns]
+    if args.force_replay_mode:
+        print("[!] Force replay mode enabled")
+        is_replay = True
+        replay_type = 'forced'
 
-    # Apply time window filter
-    has_ebpf = merged["first_ts_s"].notna()
-    if has_ebpf.any():
-        print(f"[*] Applying time window filter (±{args.time_slop}s)...")
-        
-        # Check if eBPF time overlaps with Zeek time window
-        time_ok = (
-            (merged["first_ts_s"] <= merged["end_ts"] + args.time_slop) &
-            (merged["last_ts_s"]  >= merged["start_ts"] - args.time_slop)
-        )
-        
-        # Only filter flows that have eBPF data
-        valid = ~has_ebpf | time_ok
-        filtered_out = (~valid).sum()
-        
-        if filtered_out > 0:
-            print(f"[*] Filtered out {filtered_out} flows due to time mismatch")
-            if args.debug and filtered_out < 100:
-                mismatched = merged[~valid][["orig_h","resp_h","orig_p","resp_p","proto",
-                                              "start_ts","end_ts","first_ts_s","last_ts_s"]].head(10)
-                print("[DEBUG] Sample time mismatches:")
-                print(mismatched.to_string())
-        
-        merged = merged[valid].copy()
+    # Match flows with appropriate strategy
+    merged = match_flows_with_deduplication(z, e, is_replay=is_replay, debug=args.debug)
+
+    # Apply time filter (or skip for replay)
+    merged = apply_time_filter(merged, args.time_slop, is_replay=is_replay, debug=args.debug)
 
     # Helper function for safe column access
     def col(df, name, default):
+        # Try with ebpf_ prefix first
+        if f'ebpf_{name}' in df.columns:
+            return df[f'ebpf_{name}']
         if name in df.columns:
             return df[name]
         return pd.Series([default] * len(df), index=df.index)
 
-    # Create output columns
+    # Create standardized output columns
     merged["ebpf_bytes_sent"] = col(merged, "bytes_sent", 0).fillna(0).astype(float)
     merged["ebpf_bytes_recv"] = col(merged, "bytes_recv", 0).fillna(0).astype(float)
     merged["ebpf_retransmits"] = col(merged, "retransmits", 0).fillna(0).astype(float)
@@ -347,18 +501,22 @@ def main():
     ]
     out_cols.extend(run_meta_cols)
 
+    # Filter to columns that exist
+    out_cols = [c for c in out_cols if c in merged.columns]
+    
     # Write output
     merged[out_cols].to_csv(args.out, index=False)
     
     # Calculate statistics
     total_flows = len(merged)
-    enriched_flows = int(has_ebpf.sum())
-    enrichment_rate = (enriched_flows / total_flows * 100) if total_flows > 0 else 0
-    
+    enriched_flows = int((merged['ebpf_samples'] > 0).sum())
     flows_with_data = int((merged['ebpf_bytes_sent'] > 0).sum())
+    
+    enrichment_rate = (enriched_flows / total_flows * 100) if total_flows > 0 else 0
     data_rate = (flows_with_data / total_flows * 100) if total_flows > 0 else 0
     
     print(f"\n[*] MERGE COMPLETE")
+    print(f"[*] Scenario: {replay_type.upper()} ({'REPLAY' if is_replay else 'LIVE CAPTURE'})")
     print(f"[*] Total flows: {total_flows:,}")
     print(f"[*] Enriched with eBPF: {enriched_flows:,} ({enrichment_rate:.1f}%)")
     print(f"[*] Flows with packet data: {flows_with_data:,} ({data_rate:.1f}%)")
@@ -369,7 +527,8 @@ def main():
         print("\n[DEBUG] eBPF enrichment statistics:")
         print(f"  - Flows with bytes_sent > 0: {flows_with_data:,}")
         print(f"  - Flows with retransmits: {(merged['ebpf_retransmits'] > 0).sum():,}")
-        print(f"  - Total bytes captured: {merged['ebpf_bytes_sent'].sum() + merged['ebpf_bytes_recv'].sum():,.0f}")
+        total_bytes = merged['ebpf_bytes_sent'].sum() + merged['ebpf_bytes_recv'].sum()
+        print(f"  - Total bytes captured: {total_bytes:,.0f}")
         
         sample = merged[merged['ebpf_bytes_sent'] > 0][["orig_h","resp_h","orig_p","resp_p","proto",
                                                           "ebpf_bytes_sent","ebpf_samples"]].head(5)
