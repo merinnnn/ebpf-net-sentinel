@@ -120,7 +120,7 @@ Notes:
 The script prints a run folder like:
 
 ```text
-Run folder: /home/merin/.../data/runs/2026-01-31_114048
+Run folder: .../ebpf-net-sentinel/data/runs/<YYYY-MM-DD_HHMMSS>
 ```
 
 Inside that folder you should see (names may vary slightly):
@@ -139,7 +139,7 @@ Inside that folder you should see (names may vary slightly):
 **What it does**: starts Zeek and the eBPF collector on a real interface until you press **Ctrl+C**.
 
 ```bash
-sudo bash ubuntu/run_live.sh eth0
+sudo bash ubuntu/run_live.sh <IFACE>
 ```
 
 **Expected output**:
@@ -158,10 +158,10 @@ The merge uses `run_meta.json` to **synchronise timestamps** between PCAP time a
 
 ```bash
 python3 ubuntu/merge_zeek_ebpf.py \
-  --zeek_conn data/runs/2026-02-01_002734/zeek/conn.csv \
-  --ebpf_agg  data/runs/2026-02-01_002734/ebpf_agg.jsonl \
-  --run_meta  data/runs/2026-02-01_002734/run_meta.json \
-  --out       data/runs/2026-02-01_002734/merged.parquet
+  --zeek_conn data/runs/<YYYY-MM-DD_HHMMSS>/zeek/conn.csv \
+  --ebpf_agg  data/runs/<YYYY-MM-DD_HHMMSS>/ebpf_agg.jsonl \
+  --run_meta  data/runs/<YYYY-MM-DD_HHMMSS>/run_meta.json \
+  --out       data/runs/<YYYY-MM-DD_HHMMSS>/merged.parquet
 ```
 
 (Optional debug)
