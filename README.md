@@ -35,15 +35,16 @@ bash ubuntu/setup.sh
 ```bash
 data
 ├── cicids2017_csv
-│   └── MachineLearningCSV
-│       ├── Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv
-│       ├── Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv
-│       ├── Friday-WorkingHours-Morning.pcap_ISCX.csv
-│       ├── Monday-WorkingHours.pcap_ISCX.csv
-│       ├── Thursday-WorkingHours-Afternoon-Infilteration.pcap_ISCX.csv
-│       ├── Thursday-WorkingHours-Morning-WebAttacks.pcap_ISCX.csv
-│       ├── Tuesday-WorkingHours.pcap_ISCX.csv
-│       └── Wednesday-workingHours.pcap_ISCX.csv
+│   └── GeneratedLabelledFlows
+│       └── TrafficLabelling
+│           ├── Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv
+│           ├── Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv
+│           ├── Friday-WorkingHours-Morning.pcap_ISCX.csv
+│           ├── Monday-WorkingHours.pcap_ISCX.csv
+│           ├── Thursday-WorkingHours-Afternoon-Infilteration.pcap_ISCX.csv
+│           ├── Thursday-WorkingHours-Morning-WebAttacks.pcap_ISCX.csv
+│           ├── Tuesday-WorkingHours.pcap_ISCX.csv
+│           └── Wednesday-workingHours.pcap_ISCX.csv
 └── cicids2017_pcap
     ├── Friday-WorkingHours.pcap
     ├── Monday-WorkingHours.pcap
