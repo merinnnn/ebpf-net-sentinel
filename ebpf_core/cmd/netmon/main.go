@@ -245,8 +245,7 @@ func main() {
 	flag.Parse()
 
 	if metaPath == "" {
-		// Keep behavior consistent with your script expectation: "run_meta.json"
-		// Script passes this anyway, but this prevents "missing meta" in manual runs.
+		// Keep behavior consistent with your script expectation.
 		metaPath = outPath + ".meta.json"
 	}
 
@@ -329,8 +328,11 @@ func main() {
 	}
 
 	go func() {
-		<-stopCh
-		stop()
+		// stop on first signal
+		for range stopCh {
+			stop()
+			return
+		}
 	}()
 
 	// Monotonic → epoch base
@@ -380,7 +382,13 @@ func main() {
 
 	// periodic flush ticker
 	flushTicker := time.NewTicker(time.Duration(flushSec) * time.Second)
+	// progress logger
+	progress := time.NewTicker(2 * time.Second)
+
+	// Stop tickers on exit
 	defer flushTicker.Stop()
+	defer progress.Stop()
+
 	go func() {
 		for {
 			select {
@@ -394,9 +402,6 @@ func main() {
 		}
 	}()
 
-	// progress logger
-	progress := time.NewTicker(2 * time.Second)
-	defer progress.Stop()
 	go func() {
 		for {
 			select {
@@ -418,15 +423,18 @@ func main() {
 	for {
 		rec, err := rd.Read()
 		if err != nil {
+			// If we're stopping, do NOT spin forever on non-ErrClosed errors.
+			select {
+			case <-stopping:
+				goto DONE
+			default:
+			}
+
 			if err == ringbuf.ErrClosed {
 				break
 			}
-			// transient error, keep going unless stopping requested
-			select {
-			case <-stopping:
-				break
-			default:
-			}
+
+			// transient error while running
 			continue
 		}
 
@@ -445,7 +453,7 @@ func main() {
 		// evtype=1,2,3,4 (kprobes): IPs are already in host byte order
 		var saddrU32, daddrU32 uint32
 		var saddrStr, daddrStr string
-		
+
 		if e.Evtype == 5 {
 			// Socket filter event - IPs in network byte order, need conversion
 			saddrU32 = ntohl(e.Saddr)
@@ -543,8 +551,11 @@ func main() {
 		}
 	}
 
+DONE:
 	// Ensure we stop goroutines/tickers cleanly
 	stop()
+	flushTicker.Stop()
+	progress.Stop()
 
 	log.Printf("[*] stopping, final flush...")
 
