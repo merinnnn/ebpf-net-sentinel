@@ -8,7 +8,7 @@ set -euo pipefail
 #   4) Stop netmon and leave all artifacts in data/runs/<timestamp>/
 #
 # Usage:
-#   bash ubuntu/run_capture.sh <pcap_name_or_path> <IFACE_CAPTURE> <MBPS>
+#   bash ubuntu/run_capture.sh <pcap_name_or_path> <IFACE_CAPTURE> <MBPS|topspeed>
 #
 # Optional env:
 #   REPLAY_IFACE=<iface>     # where tcpreplay sends packets (default: IFACE_CAPTURE)
@@ -18,13 +18,16 @@ set -euo pipefail
 #   SET_MTU=9000             # optional: set MTU for IFACE_CAPTURE and REPLAY_IFACE before replay
 #   FORCE_BUILD=0            # set to 1 to force rebuild netmon + BPF object (make clean all)
 #   PRECHECK_IFACES=1        # default: 1; fail fast if IFACE_CAPTURE/REPLAY_IFACE don't exist
+#
+# Output:
+#   Prints: RUN_DIR=<absolute path>
 
 PCAP_IN="${1:-}"
 IFACE_CAPTURE="${2:-}"
 MBPS="${3:-}"
 
-if [[ -z "$PCAP_IN" || -z "$IFACE_CAPTURE" || -z "$MBPS" ]]; then
-  echo "Usage: bash ubuntu/run_capture.sh <pcap> <iface_capture> <mbps>"
+if [[ -z "$PCAP_IN" || -z "$IFACE_CAPTURE" || -z "${MBPS:-}" ]]; then
+  echo "Usage: bash ubuntu/run_capture.sh <pcap> <iface_capture> <mbps|topspeed>"
   exit 2
 fi
 
@@ -94,50 +97,66 @@ if pgrep -x netmon >/dev/null; then
 fi
 
 write_fallback_meta() {
-  if [[ ! -f "$RUN_META" ]]; then
-    cat >"$RUN_META" <<EOF
+  [[ -f "$RUN_META" ]] && return 0
+  cat >"$RUN_META" <<EOF
 {
   "pcap":"$PCAP_PATH",
   "iface_capture":"$IFACE_CAPTURE",
   "replay_iface":"$REPLAY_IFACE",
-  "mbps":$MBPS,
+  "mbps":"$MBPS",
   "run_dir":"$RUN_DIR",
   "timestamp":"$RUN_TS"
 }
 EOF
-  fi
 }
 
 stop_netmon() {
   local pid="${1:-}"
   [[ -z "$pid" ]] && return 0
-  if ! sudo kill -0 "$pid" 2>/dev/null; then return 0; fi
 
-  local pgid
-  pgid="$(sudo ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
+  # If it already died, we're done.
+  if ! sudo kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+
+  # NOTE: under pipefail, ps can race and fail -> must not kill the whole script.
+  local pgid=""
+  pgid="$(sudo ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
 
   echo "[*] Stopping netmon pid=$pid pgid=${pgid:-?}"
 
-  if [[ -n "${pgid:-}" ]]; then
-    sudo kill -TERM -- "-$pgid" 2>/dev/null || true
+  # Prefer SIGINT so netmon can flush cleanly.
+  if [[ -n "$pgid" ]]; then
+    sudo kill -INT  -- "-$pgid" 2>/dev/null || true
   else
-    sudo kill -TERM "$pid" 2>/dev/null || true
+    sudo kill -INT  "$pid"      2>/dev/null || true
   fi
 
   for _ in {1..10}; do
-    if ! sudo kill -0 "$pid" 2>/dev/null; then
-      echo "[*] netmon stopped"
-      return 0
-    fi
-    sleep 0.5
+    sudo kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.3
+  done
+
+  # Escalate to TERM.
+  if [[ -n "$pgid" ]]; then
+    sudo kill -TERM -- "-$pgid" 2>/dev/null || true
+  else
+    sudo kill -TERM "$pid"      2>/dev/null || true
+  fi
+
+  for _ in {1..10}; do
+    sudo kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.3
   done
 
   echo "[!] netmon still alive; SIGKILL"
-  if [[ -n "${pgid:-}" ]]; then
+  if [[ -n "$pgid" ]]; then
     sudo kill -KILL -- "-$pgid" 2>/dev/null || true
   else
     sudo kill -KILL "$pid" 2>/dev/null || true
   fi
+
+  return 0
 }
 
 cleanup() {
@@ -145,7 +164,7 @@ cleanup() {
   stop_netmon "${NETMON_PID:-}"
   write_fallback_meta
   sudo chown -R "$(id -u):$(id -g)" "$RUN_DIR" 2>/dev/null || true
-  exit $rc
+  exit "$rc"
 }
 trap cleanup EXIT INT TERM
 
@@ -154,13 +173,12 @@ cat >"$RUN_META" <<EOF
   "pcap":"$PCAP_PATH",
   "iface_capture":"$IFACE_CAPTURE",
   "replay_iface":"$REPLAY_IFACE",
-  "mbps":$MBPS,
+  "mbps":"$MBPS",
   "run_dir":"$RUN_DIR",
   "timestamp":"$RUN_TS"
 }
 EOF
 
-# Preprocess PCAP to handle jumbo frames
 echo "[*] [1/6] Preprocessing PCAP (truncate to MTU 1500)"
 FIXED_PCAP="$RUN_DIR/$(basename "$PCAP_PATH" .pcap)-fixed.pcap"
 if command -v editcap >/dev/null 2>&1; then
@@ -208,11 +226,12 @@ echo "[*] [4/6] Start eBPF collector (netmon)"
 NETMON_BIN="$ROOT_DIR/ebpf_core/bin/netmon"
 OBJ="$ROOT_DIR/ebpf_core/bin/netmon.bpf.o"
 
-if [[ ! -x "$NETMON_BIN" && -x "$ROOT_DIR/ebpf_core/netmon" ]]; then
-  NETMON_BIN="$ROOT_DIR/ebpf_core/netmon"
-fi
-if [[ ! -f "$OBJ" && -f "$ROOT_DIR/ebpf_core/netmon.bpf.o" ]]; then
-  OBJ="$ROOT_DIR/ebpf_core/netmon.bpf.o"
+[[ -x "$NETMON_BIN" ]] || NETMON_BIN="$ROOT_DIR/ebpf_core/netmon"
+[[ -f "$OBJ" ]]        || OBJ="$ROOT_DIR/ebpf_core/netmon.bpf.o"
+
+if [[ ! -x "$NETMON_BIN" || ! -f "$OBJ" ]]; then
+  echo "[x] netmon not built (expected $ROOT_DIR/ebpf_core/bin/netmon and netmon.bpf.o)"
+  exit 1
 fi
 
 # Attach socket filter to REPLAY_IFACE (where tcpreplay sends)
@@ -244,9 +263,9 @@ sudo bash -c '
 NETMON_PID="$(cat "$NETMON_PIDFILE" 2>/dev/null || true)"
 sleep 0.5
 
-if ! sudo kill -0 "$NETMON_PID" 2>/dev/null; then
+if [[ -z "$NETMON_PID" ]] || ! sudo kill -0 "$NETMON_PID" 2>/dev/null; then
   echo "[x] netmon died immediately"
-  tail -n 50 "$NETMON_LOG" || true
+  tail -n 80 "$NETMON_LOG" || true
   exit 1
 fi
 
@@ -255,16 +274,29 @@ echo "[*]   netmon pid: $NETMON_PID"
 echo "[*] [5/6] Replay PCAP (tcpreplay)"
 TCPREPLAY_LOG="$RUN_DIR/tcpreplay.log"
 
-# Use --topspeed for efficient replay
-echo "  [*] tcpreplay args: --intf1 $REPLAY_IFACE --topspeed --stats=1"
+# Respect caller intent:
+# - MBPS="topspeed" -> --topspeed
+# - MBPS="<number>" -> --mbps <number>
+TCPREPLAY_ARGS=( --intf1 "$REPLAY_IFACE" --stats=1 )
+
+if [[ "$MBPS" == "topspeed" || "$MBPS" == "TOPSPEED" ]]; then
+  TCPREPLAY_ARGS+=( --topspeed )
+else
+  # basic numeric check
+  if [[ "$MBPS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    TCPREPLAY_ARGS+=( --mbps "$MBPS" )
+  else
+    echo "[x] Invalid MBPS arg: '$MBPS' (use number or 'topspeed')"
+    exit 1
+  fi
+fi
+
+echo "  [*] tcpreplay args: ${TCPREPLAY_ARGS[*]}"
 echo "  [*] tcpreplay log -> $TCPREPLAY_LOG"
 
-sudo tcpreplay --intf1 "$REPLAY_IFACE" \
-  --topspeed \
-  --stats=1 \
-  "$PCAP_TO_REPLAY" >"$TCPREPLAY_LOG" 2>&1 || {
-  echo "[x] tcpreplay failed";
-  tail -n 50 "$TCPREPLAY_LOG" || true
+sudo tcpreplay "${TCPREPLAY_ARGS[@]}" "$PCAP_TO_REPLAY" >"$TCPREPLAY_LOG" 2>&1 || {
+  echo "[x] tcpreplay failed"
+  tail -n 80 "$TCPREPLAY_LOG" || true
   exit 1
 }
 
@@ -279,5 +311,6 @@ sudo chown -R "$(id -u):$(id -g)" "$RUN_DIR" 2>/dev/null || true
 
 echo "[*] Done."
 echo "  Run folder: $RUN_DIR"
+echo "RUN_DIR=$RUN_DIR"
 echo "  Outputs:"
 ls -lah "$EBPF_AGG" "$EBPF_EVENTS" "$RUN_META" 2>/dev/null || true
