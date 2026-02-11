@@ -3,44 +3,23 @@ import argparse
 import glob
 import json
 import os
+import time
+from typing import List, Tuple, Optional
 
 import pandas as pd
 
+# Protocol mapping used by CICIDS label CSVs and by our merged Zeek flows.
 PROTO_MAP = {"tcp": 6, "udp": 17, "icmp": 1}
+
+DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
 
 
 def norm_day_from_path(s: str) -> str:
     s = os.path.basename(str(s)).lower()
-    for d in ["monday", "tuesday", "wednesday", "thursday", "friday"]:
-        if d in s:
-            return d.capitalize()
+    for d in DAYS:
+        if d.lower() in s:
+            return d
     return "Unknown"
-
-
-def infer_day(run_dir: str, meta: dict) -> str:
-    # 1) explicit day field if present
-    for k in ("day", "Day"):
-        if k in meta and meta[k]:
-            d = str(meta[k]).strip()
-            if d:
-                return d.capitalize()
-
-    # 2) infer from meta paths
-    for k in ("pcap", "pcap_path", "pcap_in", "pcap_file"):
-        v = meta.get(k, "")
-        d = norm_day_from_path(v)
-        if d != "Unknown":
-            return d
-
-    # 3) infer from any pcap in run dir
-    for cand in glob.glob(os.path.join(run_dir, "*.pcap")):
-        d = norm_day_from_path(cand)
-        if d != "Unknown":
-            return d
-
-    # 4) infer from run_dir name
-    d = norm_day_from_path(run_dir)
-    return d
 
 
 def label_family(label: str) -> str:
@@ -68,24 +47,71 @@ def label_family(label: str) -> str:
     return "Other"
 
 
-def read_csv_robust(fp: str) -> pd.DataFrame:
+def read_csv_robust(fp: str, usecols=None) -> pd.DataFrame:
     for enc in ("utf-8", "cp1252", "latin1"):
         try:
-            return pd.read_csv(fp, low_memory=False, encoding=enc)
+            return pd.read_csv(fp, low_memory=False, encoding=enc, usecols=usecols)
         except UnicodeDecodeError:
             continue
-    return pd.read_csv(fp, low_memory=False, encoding="latin1")
+    return pd.read_csv(fp, low_memory=False, encoding="latin1", usecols=usecols)
 
 
 def parse_cicids_timestamp_series(ts: pd.Series) -> pd.Series:
     s = ts.astype(str).str.strip()
+
+    fmts = [
+        "%d/%m/%Y %H:%M:%S",
+        "%m/%d/%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M",
+        "%m/%d/%Y %H:%M",
+        "%d/%m/%Y %I:%M:%S %p",
+        "%m/%d/%Y %I:%M:%S %p",
+        "%d/%m/%Y %I:%M %p",
+        "%m/%d/%Y %I:%M %p",
+    ]
+
+    best = None
+    best_ok = -1
+
+    for fmt in fmts:
+        dt = pd.to_datetime(s, errors="coerce", format=fmt)
+        ok = int(dt.notna().sum())
+        if ok > best_ok:
+            best = dt
+            best_ok = ok
+        if ok == len(s):
+            break
+
     dt = pd.to_datetime(s, errors="coerce", dayfirst=True)
-    if dt.isna().mean() > 0.5:
-        dt2 = pd.to_datetime(s, errors="coerce", dayfirst=False)
-        if dt2.notna().sum() > dt.notna().sum():
-            dt = dt2
-    out = (dt.astype("int64") / 1e9).where(dt.notna(), pd.NA)
+    if int(dt.notna().sum()) > best_ok:
+        best, best_ok = dt, int(dt.notna().sum())
+
+    dt = pd.to_datetime(s, errors="coerce", dayfirst=False)
+    if int(dt.notna().sum()) > best_ok:
+        best, best_ok = dt, int(dt.notna().sum())
+
+    out = (best.astype("int64") / 1e9).where(best.notna(), pd.NA)
     return out
+
+
+def maybe_shift_afternoon_12h(df: pd.DataFrame, src_fp: str) -> pd.DataFrame:
+    """
+    CICIDS2017 'Afternoon' label CSVs can encode 1pm..5pm as 1:00..5:00 (no AM/PM).
+    If filename contains 'Afternoon' and the median hour < 12, shift by +12h.
+    """
+    base = os.path.basename(src_fp).lower()
+    if "afternoon" not in base:
+        return df
+
+    dt = pd.to_datetime(df["Timestamp"].astype(str).str.strip(), errors="coerce", dayfirst=True)
+    hrs = dt.dt.hour.dropna()
+    if len(hrs) == 0:
+        return df
+
+    if float(hrs.median()) < 12.0:
+        df["ts"] = df["ts"].astype("float64") + 12.0 * 3600.0
+        print(f"    [!] afternoon timestamp fix: +12h applied ({os.path.basename(src_fp)})")
+    return df
 
 
 def norm_proto_to_int(x) -> int:
@@ -105,26 +131,44 @@ def make_key(src_ip, src_port, dst_ip, dst_port, proto_i) -> pd.Series:
     )
 
 
+def _stable_sort_for_asof(df: pd.DataFrame, by_cols: List[str]) -> pd.DataFrame:
+    df = df.sort_values(by_cols, kind="mergesort")
+    return df.reset_index(drop=True)
+
+
+def find_label_files_for_day(labels_dir: str, day: str) -> List[str]:
+    pats = [
+        os.path.join(labels_dir, f"*{day}*pcap_ISCX.csv"),
+        os.path.join(labels_dir, f"*{day.lower()}*pcap_ISCX.csv"),
+    ]
+    out: List[str] = []
+    for pat in pats:
+        out.extend(glob.glob(pat))
+    out = sorted(set(out), key=lambda p: p.lower())
+    return out
+
+
 def load_labels_for_day(labels_dir: str, day: str) -> pd.DataFrame:
-    pat = os.path.join(labels_dir, f"*{day}*pcap_ISCX.csv")
-    files = sorted(glob.glob(pat), key=lambda p: p.lower())
-    if not files:
-        pat2 = os.path.join(labels_dir, f"*{day.lower()}*pcap_ISCX.csv")
-        files = sorted(glob.glob(pat2), key=lambda p: p.lower())
+    files = find_label_files_for_day(labels_dir, day)
     if not files:
         raise FileNotFoundError(f"No label CSVs found for day={day} under {labels_dir}")
 
+    print(f"[*] Loading labels for {day}: {len(files)} file(s)")
     dfs = []
+
+    needed = ["Source IP", "Source Port", "Destination IP", "Destination Port", "Protocol", "Timestamp", "Label"]
+
     for fp in files:
+        t0 = time.time()
         df = read_csv_robust(fp)
         df.columns = [str(c).strip() for c in df.columns]
 
-        needed = ["Source IP", "Source Port", "Destination IP", "Destination Port", "Protocol", "Timestamp", "Label"]
         missing = [c for c in needed if c not in df.columns]
         if missing:
             raise ValueError(f"{fp} missing columns: {missing}")
 
         df = df[needed].copy()
+
         df["Source IP"] = df["Source IP"].astype(str).str.strip()
         df["Destination IP"] = df["Destination IP"].astype(str).str.strip()
         df["Source Port"] = pd.to_numeric(df["Source Port"], errors="coerce").fillna(0).astype("int64")
@@ -133,172 +177,291 @@ def load_labels_for_day(labels_dir: str, day: str) -> pd.DataFrame:
 
         df["ts"] = parse_cicids_timestamp_series(df["Timestamp"])
         df = df.dropna(subset=["ts"]).copy()
-        df["ts"] = df["ts"].astype("float64").round(0)
+        df["ts"] = df["ts"].astype("float64")
+
+        df = maybe_shift_afternoon_12h(df, fp)
 
         df["label_raw"] = df["Label"].astype(str).str.strip()
         df["label_family"] = df["label_raw"].map(label_family)
+        df["is_attack"] = (df["label_family"] != "BENIGN").astype("int8")
 
         df["key"] = make_key(df["Source IP"], df["Source Port"], df["Destination IP"], df["Destination Port"], df["Protocol"])
         df["key_rev"] = make_key(df["Destination IP"], df["Destination Port"], df["Source IP"], df["Source Port"], df["Protocol"])
 
-        dfs.append(df[["ts", "key", "key_rev", "label_family", "label_raw"]])
+        fwd = df[["ts", "key", "label_family", "label_raw", "is_attack"]].rename(columns={"key": "k"})
+        rev = df[["ts", "key_rev", "label_family", "label_raw", "is_attack"]].rename(columns={"key_rev": "k"})
+        lab_any = pd.concat([fwd, rev], ignore_index=True)
+        lab_any["k"] = lab_any["k"].astype(str)
+
+        lab_any = lab_any.sort_values(["is_attack"], ascending=False)
+        lab_any = lab_any.drop_duplicates(subset=["ts", "k"], keep="first")
+
+        t1 = time.time()
+        print(f"    - read {os.path.basename(fp)} rows={len(df)} ({t1 - t0:.1f}s) "
+              f"range={lab_any['ts'].min():.0f}..{lab_any['ts'].max():.0f}")
+
+        dfs.append(lab_any)
 
     lab = pd.concat(dfs, ignore_index=True)
 
-    # Prefer attacks over benign when multiple candidates exist
-    lab["is_attack"] = (lab["label_family"] != "BENIGN").astype("int8")
-    lab = lab.sort_values(["is_attack"], ascending=False)
+    attacks = int((lab["is_attack"] == 1).sum())
+    print(f"[*] Labels loaded: rows={len(lab)} attacks={attacks}")
 
-    # IMPORTANT: do NOT drop_duplicates by (ts,key) here; it kills candidates.
     return lab
 
 
-def _stable_sort_for_asof(df: pd.DataFrame, by_cols):
-    df = df.sort_values(by_cols, kind="mergesort")
-    return df.reset_index(drop=True)
+def read_run_meta(run_dir: str) -> dict:
+    meta_path = os.path.join(run_dir, "run_meta.json")
+    with open(meta_path, "r") as f:
+        return json.load(f)
 
 
-def estimate_offset_seconds(df_ts: pd.Series, lab_ts: pd.Series) -> int:
-    # robust offsets from quantiles + median
-    qs = [0.01, 0.05, 0.10, 0.50, 0.90]
-    cands = []
-    for q in qs:
-        a = float(df_ts.quantile(q))
-        b = float(lab_ts.quantile(q))
-        if pd.notna(a) and pd.notna(b):
-            cands.append(int(round(a - b)))
-    a = float(df_ts.median())
-    b = float(lab_ts.median())
-    if pd.notna(a) and pd.notna(b):
-        cands.append(int(round(a - b)))
-
-    if not cands:
-        return 0
-
-    # pick the mode-ish (most frequent) after bucketing to 60s
-    buckets = {}
-    for x in cands:
-        k = int(round(x / 60.0)) * 60
-        buckets[k] = buckets.get(k, 0) + 1
-    best = max(buckets.items(), key=lambda kv: kv[1])[0]
-    return int(best)
-
-
-def label_run(run_dir: str, labels_dir: str, out_dir: str, time_slop: int, tolerance_sec: int) -> str:
-    run_meta = os.path.join(run_dir, "run_meta.json")
-    merged_csv = os.path.join(run_dir, "merged.csv")
-
-    with open(run_meta, "r") as f:
-        meta = json.load(f)
-
-    day = infer_day(run_dir, meta)
-    lab = load_labels_for_day(labels_dir, day)
-
-    df = pd.read_csv(merged_csv, low_memory=False)
-
-    required = ["ts", "orig_h", "orig_p", "resp_h", "resp_p", "proto"]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(f"{merged_csv} missing columns: {missing}")
-
+def run_time_range(merged_csv: str) -> Tuple[float, float]:
+    df = pd.read_csv(merged_csv, usecols=["ts"], low_memory=False)
     df["ts"] = pd.to_numeric(df["ts"], errors="coerce")
-    df = df.dropna(subset=["ts"]).copy()
-    df["ts"] = df["ts"].astype("float64").round(0)
+    df = df.dropna(subset=["ts"])
+    return float(df["ts"].min()), float(df["ts"].max())
 
-    df["src_ip"] = df["orig_h"].astype(str).str.strip()
-    df["dst_ip"] = df["resp_h"].astype(str).str.strip()
-    df["src_port"] = pd.to_numeric(df["orig_p"], errors="coerce").fillna(0).astype("int64")
-    df["dst_port"] = pd.to_numeric(df["resp_p"], errors="coerce").fillna(0).astype("int64")
-    df["proto_i"] = df["proto"].map(norm_proto_to_int).astype("int64")
 
-    df["k"] = make_key(df["src_ip"], df["src_port"], df["dst_ip"], df["dst_port"], df["proto_i"]).astype(str)
-    df = df.dropna(subset=["k", "ts"]).copy()
+def compute_offset(run_ts_min: float, lab_ts_min: float) -> int:
+    return int(round(run_ts_min - lab_ts_min))
 
-    # Better offset estimate
-    offset = estimate_offset_seconds(df["ts"], lab["ts"])
-    lab2 = lab.copy()
-    lab2["ts_shift"] = (lab2["ts"].astype("float64") + float(offset)).astype("float64").round(0)
 
-    # Normalize both directions into one column k
-    fwd = lab2[["ts_shift", "key", "label_family", "label_raw", "is_attack"]].rename(columns={"key": "k"})
-    rev = lab2[["ts_shift", "key_rev", "label_family", "label_raw", "is_attack"]].rename(columns={"key_rev": "k"})
-    lab_any = pd.concat([fwd, rev], ignore_index=True)
-    lab_any["k"] = lab_any["k"].astype(str)
-    lab_any = lab_any.dropna(subset=["k", "ts_shift"]).copy()
+def merge_two_pass(df: pd.DataFrame, lab_any: pd.DataFrame, offset: int, tol_s: int) -> pd.DataFrame:
+    """
+    Two merges:
+      - nearest match for flow start ts
+      - nearest match for flow end t_end
+    Choose better label:
+      attack > benign > unknown.
+    """
+    lab = lab_any.copy()
+    lab["ts_shift"] = (lab["ts"].astype("float64") + float(offset)).astype("float64")
 
-    # STRICT sorting for merge_asof
-    df2 = _stable_sort_for_asof(df, ["ts", "k"])
-    lab_any = _stable_sort_for_asof(lab_any, ["ts_shift", "k"])
+    df_ts = _stable_sort_for_asof(df, ["ts", "k"])
+    df_end = _stable_sort_for_asof(df, ["t_end", "k"])
+    lab_s = _stable_sort_for_asof(lab, ["ts_shift", "k"])
 
-    tol = int(max(0, tolerance_sec + time_slop))
-
-    # Two-stage join:
-    # 1) Try matching ATTACK labels first (prevents benign swallowing near-misses)
-    lab_attack = lab_any[lab_any["label_family"] != "BENIGN"].copy()
-    lab_benign = lab_any[lab_any["label_family"] == "BENIGN"].copy()
-
-    joined = pd.merge_asof(
-        df2,
-        lab_attack,
+    j1 = pd.merge_asof(
+        df_ts,
+        lab_s[["ts_shift", "k", "label_family", "label_raw", "is_attack"]],
         left_on="ts",
         right_on="ts_shift",
         by="k",
         direction="nearest",
-        tolerance=tol,
+        tolerance=tol_s,
     )
 
-    # 2) Fill remaining with BENIGN matches
-    need = joined["label_family"].isna()
-    if need.any():
-        joined_need = joined.loc[need, :].copy()
-        filled = pd.merge_asof(
-            joined_need.drop(columns=["ts_shift", "label_family", "label_raw", "is_attack"], errors="ignore"),
-            lab_benign,
-            left_on="ts",
-            right_on="ts_shift",
-            by="k",
-            direction="nearest",
-            tolerance=tol,
-        )
-        # write back filled cols
-        for c in ["ts_shift", "label_family", "label_raw", "is_attack"]:
-            joined.loc[need, c] = filled[c].values
+    j2 = pd.merge_asof(
+        df_end,
+        lab_s[["ts_shift", "k", "label_family", "label_raw", "is_attack"]],
+        left_on="t_end",
+        right_on="ts_shift",
+        by="k",
+        direction="nearest",
+        tolerance=tol_s,
+    )
 
-    joined["label_family"] = joined["label_family"].fillna("Unknown")
-    joined["label_raw"] = joined["label_raw"].fillna("Unknown")
-    joined["day"] = day
-    joined["run_id"] = os.path.basename(run_dir.rstrip("/"))
-    joined["label_time_offset_sec"] = int(offset)
-    joined["label_tol_sec"] = int(tol)
+    j1 = j1.sort_values("__row_id").reset_index(drop=True)
+    j2 = j2.sort_values("__row_id").reset_index(drop=True)
+
+    def score(fam):
+        if pd.isna(fam):
+            return 0
+        if fam == "BENIGN":
+            return 2
+        if fam == "Unknown":
+            return 0
+        return 3
+
+    s1 = j1["label_family"].map(score)
+    s2 = j2["label_family"].map(score)
+
+    pick2 = (s2.fillna(0) > s1.fillna(0))
+
+    out = j1.copy()
+    for col in ["label_family", "label_raw", "is_attack", "ts_shift"]:
+        if col in j2.columns:
+            out.loc[pick2, col] = j2.loc[pick2, col].values
+
+    return out
+
+
+def label_run_chunked(
+    run_dir: str,
+    labels_dir: str,
+    out_dir: str,
+    pre_slop: int,
+    post_slop: int,
+    chunksize: int,
+) -> str:
+    run_dir = run_dir.rstrip("/")
+    merged_csv = os.path.join(run_dir, "merged.csv")
+    meta = read_run_meta(run_dir)
+    day = norm_day_from_path(meta.get("pcap", ""))
+
+    if day == "Unknown":
+        raise ValueError(f"Could not infer day from run_meta.json pcap={meta.get('pcap')}")
+
+    lab_any = load_labels_for_day(labels_dir, day)
+
+    rmin, rmax = run_time_range(merged_csv)
+    offset = compute_offset(rmin, float(lab_any["ts"].min()))
+
+    tol_s = int(max(0, max(pre_slop, post_slop)))
+
+    print(f"[*] {run_dir}: using offset={offset}s tol={tol_s}s chunksize={chunksize} "
+          f"(run_ts={rmin:.0f}..{rmax:.0f})")
 
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, f"{joined['run_id'].iloc[0]}_labeled.parquet")
-    joined.to_parquet(out_path, index=False)
+    out_path = os.path.join(out_dir, f"{os.path.basename(run_dir)}_labeled.parquet")
 
-    total = len(joined)
-    known = (joined["label_family"] != "Unknown").sum()
-    print(f"[*] {run_dir}: labeled {known}/{total} ({known/total*100:.2f}%) day={day} offset={offset}s tol={tol}s")
+    required_cols = ["ts", "duration", "orig_h", "orig_p", "resp_h", "resp_p", "proto"]
+    extra_keep = [
+        "conn_state", "orig_bytes", "resp_bytes", "orig_pkts", "resp_pkts",
+        "start_ts", "end_ts",
+        "ebpf_bytes_sent", "ebpf_bytes_recv", "ebpf_retransmits", "ebpf_state_changes",
+        "ebpf_samples", "ebpf_pid", "ebpf_uid", "ebpf_comm",
+    ]
+
+    hdr = pd.read_csv(merged_csv, nrows=0)
+    present = set([c.strip() for c in hdr.columns])
+    usecols = [c for c in (required_cols + extra_keep) if c in present]
+
+    total = 0
+    known = 0
+    attacks = 0
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    writer: Optional[pq.ParquetWriter] = None
+
+    for chunk in pd.read_csv(merged_csv, low_memory=False, chunksize=chunksize, usecols=usecols):
+        chunk = chunk.copy()
+        chunk["__row_id"] = range(total, total + len(chunk))
+
+        chunk["ts"] = pd.to_numeric(chunk["ts"], errors="coerce")
+        chunk["duration"] = pd.to_numeric(chunk.get("duration", 0), errors="coerce").fillna(0.0)
+        chunk = chunk.dropna(subset=["ts"]).copy()
+        chunk["ts"] = chunk["ts"].astype("float64")
+        chunk["duration"] = chunk["duration"].astype("float64").clip(lower=0.0)
+
+        chunk["t_end"] = (chunk["ts"] + chunk["duration"]).astype("float64")
+
+        chunk["src_ip"] = chunk["orig_h"].astype(str).str.strip()
+        chunk["dst_ip"] = chunk["resp_h"].astype(str).str.strip()
+        chunk["src_port"] = pd.to_numeric(chunk["orig_p"], errors="coerce").fillna(0).astype("int64")
+        chunk["dst_port"] = pd.to_numeric(chunk["resp_p"], errors="coerce").fillna(0).astype("int64")
+        chunk["proto_i"] = chunk["proto"].map(norm_proto_to_int).astype("int64")
+
+        chunk["k"] = make_key(
+            chunk["src_ip"], chunk["src_port"], chunk["dst_ip"], chunk["dst_port"], chunk["proto_i"]
+        ).astype(str)
+
+        joined = merge_two_pass(chunk, lab_any, offset=offset, tol_s=tol_s)
+
+        joined["label_family"] = joined["label_family"].fillna("Unknown").astype(str)
+        joined["label_raw"] = joined["label_raw"].fillna("Unknown").astype(str)
+        joined["day"] = day
+        joined["run_id"] = os.path.basename(run_dir)
+        joined["label_time_offset_sec"] = int(offset)
+        joined["label_window_pre_slop_sec"] = int(pre_slop)
+        joined["label_window_post_slop_sec"] = int(post_slop)
+
+        total += len(joined)
+        kcount = int((joined["label_family"] != "Unknown").sum())
+        acount = int(((joined["label_family"] != "Unknown") & (joined["label_family"] != "BENIGN")).sum())
+        known += kcount
+        attacks += acount
+
+        if total % max(1, (chunksize * 5)) == 0:
+            print(f"    progress: rows={total} known={known} attacks={attacks}")
+
+        joined = joined.drop(columns=["__row_id"], errors="ignore")
+        joined = joined.drop(columns=["ts_shift"], errors="ignore")
+
+        table = pa.Table.from_pandas(joined, preserve_index=False)
+
+        if writer is None:
+            writer = pq.ParquetWriter(out_path, table.schema, compression="snappy")
+        writer.write_table(table)
+
+    if writer is not None:
+        writer.close()
+
+    pct = (known / total * 100.0) if total else 0.0
+    apct = (attacks / total * 100.0) if total else 0.0
+    print(f"[*] {run_dir}: labeled {known}/{total} ({pct:.2f}%) attacks={attacks} ({apct:.2f}%) "
+          f"day={day} offset={offset}s -> {out_path}")
+
     return out_path
+
+
+def combine_parquets(out_files: List[str], combined_out: str) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    os.makedirs(os.path.dirname(combined_out), exist_ok=True)
+
+    writer = None
+    rows = 0
+
+    for fp in out_files:
+        pf = pq.ParquetFile(fp)
+        for batch in pf.iter_batches():
+            table = pa.Table.from_batches([batch])
+            if writer is None:
+                writer = pq.ParquetWriter(combined_out, table.schema, compression="snappy")
+            writer.write_table(table)
+            rows += table.num_rows
+
+    if writer is not None:
+        writer.close()
+
+    print(f"[*] Wrote combined labeled dataset: {combined_out} rows={rows}")
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--runs", nargs="+", required=True)
-    ap.add_argument("--labels_dir", required=True)
-    ap.add_argument("--out_dir", default="data/datasets/labeled_runs")
-    ap.add_argument("--time_slop", type=int, default=10, help="extra cushion seconds on top of tolerance")
-    ap.add_argument("--tolerance", type=int, default=600, help="asof tolerance in seconds (try 600-7200)")
-    ap.add_argument("--combined_out", default="data/datasets/cicids2017_multiclass_zeek_ebpf.parquet")
+    ap.add_argument("--runs", nargs="+", required=True, help="run directories (each must contain merged.csv + run_meta.json)")
+    ap.add_argument("--labels_dir", required=True, help="CICIDS2017 TrafficLabelling directory")
+    ap.add_argument("--out_dir", default="data/datasets/labeled_runs", help="per-run labeled parquet output directory")
+    ap.add_argument("--pre_slop", type=int, default=7200, help="seconds tolerance for matching (symmetric)")
+    ap.add_argument("--post_slop", type=int, default=7200, help="kept for metadata (symmetric matching is used)")
+    ap.add_argument("--chunksize", type=int, default=50000, help="CSV rows per chunk")
+    ap.add_argument("--combined_out", default="data/datasets/cicids2017_multiclass_zeek_ebpf.parquet", help="combined parquet output path")
+    ap.add_argument("--no_combine", action="store_true", help="only write per-run outputs, skip combined parquet")
+
     args = ap.parse_args()
 
-    outs = []
+    outs: List[str] = []
     for r in args.runs:
-        outs.append(label_run(r, args.labels_dir, args.out_dir, time_slop=args.time_slop, tolerance_sec=args.tolerance))
+        merged = os.path.join(r, "merged.csv")
+        if not (os.path.exists(merged) and os.path.getsize(merged) > 0):
+            print(f"[!] skipping {r}: merged.csv missing/empty")
+            continue
 
-    df_all = pd.concat([pd.read_parquet(p) for p in outs], ignore_index=True)
-    os.makedirs(os.path.dirname(args.combined_out), exist_ok=True)
-    df_all.to_parquet(args.combined_out, index=False)
-    print(f"[*] Wrote combined labeled dataset: {args.combined_out} rows={len(df_all)}")
+        outs.append(
+            label_run_chunked(
+                r,
+                args.labels_dir,
+                args.out_dir,
+                pre_slop=args.pre_slop,
+                post_slop=args.post_slop,
+                chunksize=args.chunksize,
+            )
+        )
+
+    if args.no_combine:
+        print(f"[*] Skipping combine (--no_combine). Per-run outputs are in: {args.out_dir}")
+        return
+
+    if not outs:
+        print("[!] no per-run outputs produced; nothing to combine")
+        return
+
+    combine_parquets(outs, args.combined_out)
 
 
 if __name__ == "__main__":
