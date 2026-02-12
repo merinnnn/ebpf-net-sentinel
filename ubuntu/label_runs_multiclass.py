@@ -9,6 +9,7 @@ from typing import List, Tuple, Optional
 import pandas as pd
 
 PROTO_MAP = {"tcp": 6, "udp": 17, "icmp": 1}
+
 DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
 HALFDAY_SHIFTS = [0, 43200, -43200]
 
@@ -236,6 +237,13 @@ def compute_offset(run_ts_min: float, lab_ts_min: float) -> int:
 
 
 def merge_two_pass(df: pd.DataFrame, lab_any: pd.DataFrame, offset: int, tol_s: int) -> pd.DataFrame:
+    """
+    Two merges:
+      - nearest match for flow start ts
+      - nearest match for flow end t_end
+    Choose better label:
+      attack > benign > unknown.
+    """
     lab = lab_any.copy()
     lab["ts_shift"] = (lab["ts"].astype("float64") + float(offset)).astype("float64")
 
@@ -383,6 +391,7 @@ def label_run_chunked(
 
     rmin, rmax = run_time_range(merged_csv)
     base_offset = compute_offset(rmin, float(lab_any["ts"].min()))
+
     tol_s = int(max(0, max(pre_slop, post_slop)))
 
     halfday_shift = 0
@@ -412,7 +421,6 @@ def label_run_chunked(
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, f"{os.path.basename(run_dir)}_labeled.parquet")
 
-    # IMPORTANT: avoid stale schema issues from previous runs
     if os.path.exists(out_path):
         os.remove(out_path)
 
