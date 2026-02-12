@@ -8,10 +8,9 @@ from typing import List, Tuple, Optional
 
 import pandas as pd
 
-# Protocol mapping used by CICIDS label CSVs and by our merged Zeek flows.
 PROTO_MAP = {"tcp": 6, "udp": 17, "icmp": 1}
-
 DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+HALFDAY_SHIFTS = [0, 43200, -43200]
 
 
 def norm_day_from_path(s: str) -> str:
@@ -36,7 +35,7 @@ def label_family(label: str) -> str:
         return "PortScan"
     if "bot" in x:
         return "Bot"
-    if "bruteforce" in x or "ssh" in x or "ftp" in x:
+    if "bruteforce" in x or "ssh" in x or "ftp" in x or "patator" in x:
         return "BruteForce"
     if "web attack" in x or "webattack" in x or "sql injection" in x or "xss" in x:
         return "WebAttack"
@@ -58,43 +57,16 @@ def read_csv_robust(fp: str, usecols=None) -> pd.DataFrame:
 
 def parse_cicids_timestamp_series(ts: pd.Series) -> pd.Series:
     s = ts.astype(str).str.strip()
-
-    fmts = [
-        "%d/%m/%Y %H:%M:%S",
-        "%m/%d/%Y %H:%M:%S",
-        "%d/%m/%Y %H:%M",
-        "%m/%d/%Y %H:%M",
-        "%d/%m/%Y %I:%M:%S %p",
-        "%m/%d/%Y %I:%M:%S %p",
-        "%d/%m/%Y %I:%M %p",
-        "%m/%d/%Y %I:%M %p",
-    ]
-
-    best = None
-    best_ok = -1
-
-    for fmt in fmts:
-        dt = pd.to_datetime(s, errors="coerce", format=fmt)
-        ok = int(dt.notna().sum())
-        if ok > best_ok:
-            best = dt
-            best_ok = ok
-        if ok == len(s):
-            break
-
-    dt = pd.to_datetime(s, errors="coerce", dayfirst=True)
-    if int(dt.notna().sum()) > best_ok:
-        best, best_ok = dt, int(dt.notna().sum())
-
-    dt = pd.to_datetime(s, errors="coerce", dayfirst=False)
-    if int(dt.notna().sum()) > best_ok:
-        best, best_ok = dt, int(dt.notna().sum())
-
-    out = (best.astype("int64") / 1e9).where(best.notna(), pd.NA)
+    dt1 = pd.to_datetime(s, errors="coerce", dayfirst=True)
+    ok1 = int(dt1.notna().sum())
+    dt2 = pd.to_datetime(s, errors="coerce", dayfirst=False)
+    ok2 = int(dt2.notna().sum())
+    dt = dt1 if ok1 >= ok2 else dt2
+    out = (dt.astype("int64") / 1e9).where(dt.notna(), pd.NA)
     return out
 
 
-def maybe_shift_afternoon_12h(df: pd.DataFrame, src_fp: str) -> pd.DataFrame:
+def maybe_shift_afternoon_filename_12h(df: pd.DataFrame, src_fp: str) -> pd.DataFrame:
     """
     CICIDS2017 'Afternoon' label CSVs can encode 1pm..5pm as 1:00..5:00 (no AM/PM).
     If filename contains 'Afternoon' and the median hour < 12, shift by +12h.
@@ -109,8 +81,43 @@ def maybe_shift_afternoon_12h(df: pd.DataFrame, src_fp: str) -> pd.DataFrame:
         return df
 
     if float(hrs.median()) < 12.0:
+        df = df.copy()
         df["ts"] = df["ts"].astype("float64") + 12.0 * 3600.0
         print(f"    [!] afternoon timestamp fix: +12h applied ({os.path.basename(src_fp)})")
+    return df
+
+
+def maybe_shift_workinghours_rows_12h(df: pd.DataFrame, src_fp: str) -> pd.DataFrame:
+    """
+    WorkingHours CSVs (Mon/Tue/Wed) can contain PM times written without AM/PM (e.g. 1:00 meaning 13:00).
+    Safe fix: shift ONLY rows whose parsed hour is in [1..6] by +12h, BUT never apply this to 'Afternoon' files
+    (those are handled by maybe_shift_afternoon_filename_12h).
+    """
+    base = os.path.basename(src_fp).lower()
+
+    # Avoid double shifting Afternoon files
+    if "afternoon" in base:
+        return df
+
+    # Trigger on 'workinghours' filenames
+    if "workinghours" not in base.replace("-", ""):
+        return df
+
+    dt = pd.to_datetime(df["Timestamp"].astype(str).str.strip(), errors="coerce", dayfirst=True)
+    hrs = dt.dt.hour
+    if hrs.isna().all():
+        return df
+
+    suspicious = hrs.between(1, 6, inclusive="both")
+    frac = float(suspicious.mean())
+
+    # Only apply if it's a meaningful chunk (prevents accidental shifting)
+    if frac < 0.03:
+        return df
+
+    df = df.copy()
+    df.loc[suspicious.fillna(False), "ts"] = df.loc[suspicious.fillna(False), "ts"].astype("float64") + 12.0 * 3600.0
+    print(f"    [!] workinghours row PM-fix: +12h applied to {int(suspicious.sum())} rows ({frac*100:.2f}%) ({os.path.basename(src_fp)})")
     return df
 
 
@@ -144,8 +151,7 @@ def find_label_files_for_day(labels_dir: str, day: str) -> List[str]:
     out: List[str] = []
     for pat in pats:
         out.extend(glob.glob(pat))
-    out = sorted(set(out), key=lambda p: p.lower())
-    return out
+    return sorted(set(out), key=lambda p: p.lower())
 
 
 def load_labels_for_day(labels_dir: str, day: str) -> pd.DataFrame:
@@ -179,7 +185,9 @@ def load_labels_for_day(labels_dir: str, day: str) -> pd.DataFrame:
         df = df.dropna(subset=["ts"]).copy()
         df["ts"] = df["ts"].astype("float64")
 
-        df = maybe_shift_afternoon_12h(df, fp)
+        # timestamp fixes
+        df = maybe_shift_afternoon_filename_12h(df, fp)
+        df = maybe_shift_workinghours_rows_12h(df, fp)
 
         df["label_raw"] = df["Label"].astype(str).str.strip()
         df["label_family"] = df["label_raw"].map(label_family)
@@ -197,16 +205,16 @@ def load_labels_for_day(labels_dir: str, day: str) -> pd.DataFrame:
         lab_any = lab_any.drop_duplicates(subset=["ts", "k"], keep="first")
 
         t1 = time.time()
-        print(f"    - read {os.path.basename(fp)} rows={len(df)} ({t1 - t0:.1f}s) "
-              f"range={lab_any['ts'].min():.0f}..{lab_any['ts'].max():.0f}")
+        print(
+            f"    - read {os.path.basename(fp)} rows={len(df)} ({t1 - t0:.1f}s) "
+            f"range={lab_any['ts'].min():.0f}..{lab_any['ts'].max():.0f}"
+        )
 
         dfs.append(lab_any)
 
     lab = pd.concat(dfs, ignore_index=True)
-
     attacks = int((lab["is_attack"] == 1).sum())
     print(f"[*] Labels loaded: rows={len(lab)} attacks={attacks}")
-
     return lab
 
 
@@ -228,13 +236,6 @@ def compute_offset(run_ts_min: float, lab_ts_min: float) -> int:
 
 
 def merge_two_pass(df: pd.DataFrame, lab_any: pd.DataFrame, offset: int, tol_s: int) -> pd.DataFrame:
-    """
-    Two merges:
-      - nearest match for flow start ts
-      - nearest match for flow end t_end
-    Choose better label:
-      attack > benign > unknown.
-    """
     lab = lab_any.copy()
     lab["ts_shift"] = (lab["ts"].astype("float64") + float(offset)).astype("float64")
 
@@ -274,10 +275,9 @@ def merge_two_pass(df: pd.DataFrame, lab_any: pd.DataFrame, offset: int, tol_s: 
             return 0
         return 3
 
-    s1 = j1["label_family"].map(score)
-    s2 = j2["label_family"].map(score)
-
-    pick2 = (s2.fillna(0) > s1.fillna(0))
+    s1 = j1["label_family"].map(score).fillna(0)
+    s2 = j2["label_family"].map(score).fillna(0)
+    pick2 = (s2 > s1)
 
     out = j1.copy()
     for col in ["label_family", "label_raw", "is_attack", "ts_shift"]:
@@ -287,6 +287,80 @@ def merge_two_pass(df: pd.DataFrame, lab_any: pd.DataFrame, offset: int, tol_s: 
     return out
 
 
+def _sample_score_shift(
+    merged_csv: str,
+    lab_any: pd.DataFrame,
+    halfday_shift_s: int,
+    base_offset: int,
+    tol_s: int,
+    sample_rows: int,
+) -> Tuple[int, int]:
+    needed = ["ts", "duration", "orig_h", "orig_p", "resp_h", "resp_p", "proto"]
+    df = pd.read_csv(merged_csv, low_memory=False, nrows=sample_rows, usecols=lambda c: c in set(needed))
+    df = df.copy()
+    df["__row_id"] = range(0, len(df))
+
+    df["ts"] = pd.to_numeric(df["ts"], errors="coerce")
+    df["duration"] = pd.to_numeric(df.get("duration", 0), errors="coerce").fillna(0.0)
+    df = df.dropna(subset=["ts"]).copy()
+    df["ts"] = df["ts"].astype("float64")
+    df["duration"] = df["duration"].astype("float64").clip(lower=0.0)
+    df["t_end"] = (df["ts"] + df["duration"]).astype("float64")
+
+    df["src_ip"] = df["orig_h"].astype(str).str.strip()
+    df["dst_ip"] = df["resp_h"].astype(str).str.strip()
+    df["src_port"] = pd.to_numeric(df["orig_p"], errors="coerce").fillna(0).astype("int64")
+    df["dst_port"] = pd.to_numeric(df["resp_p"], errors="coerce").fillna(0).astype("int64")
+    df["proto_i"] = df["proto"].map(norm_proto_to_int).astype("int64")
+    df["k"] = make_key(df["src_ip"], df["src_port"], df["dst_ip"], df["dst_port"], df["proto_i"]).astype(str)
+
+    lab2 = lab_any.copy()
+    lab2["ts"] = lab2["ts"].astype("float64") + float(halfday_shift_s)
+    offset = int(round(base_offset - halfday_shift_s))
+
+    joined = merge_two_pass(df, lab2, offset=offset, tol_s=tol_s)
+    fam = joined["label_family"].fillna("Unknown").astype(str)
+    known = int((fam != "Unknown").sum())
+    attacks = int(((fam != "Unknown") & (fam != "BENIGN")).sum())
+    return known, attacks
+
+
+def choose_halfday_shift(
+    merged_csv: str,
+    lab_any: pd.DataFrame,
+    run_ts_min: float,
+    run_ts_max: float,
+    base_offset: int,
+    tol_s: int,
+    sample_rows: int,
+) -> Tuple[int, int]:
+    lab_min = float(lab_any["ts"].min())
+    lab_max = float(lab_any["ts"].max())
+
+    def overlap(a0, a1, b0, b1) -> float:
+        lo = max(a0, b0)
+        hi = min(a1, b1)
+        return max(0.0, hi - lo)
+
+    best_shift = 0
+    best_tuple = None  # (attacks, known, overlap)
+
+    for sh in HALFDAY_SHIFTS:
+        w0 = lab_min + sh
+        w1 = lab_max + sh
+        ov = overlap(run_ts_min, run_ts_max, w0, w1)
+        known, attacks = _sample_score_shift(merged_csv, lab_any, sh, base_offset, tol_s, sample_rows)
+        off = int(round(base_offset - sh))
+        print(f"    [auto_halfday_shift] shift={sh:+6d}s offset={off:+6d}s overlap_h={ov/3600:.2f} sample_known={known}/{sample_rows} sample_attacks={attacks}")
+
+        tup = (attacks, known, ov)
+        if best_tuple is None or tup > best_tuple:
+            best_tuple = tup
+            best_shift = sh
+
+    return int(best_shift), int(round(base_offset - best_shift))
+
+
 def label_run_chunked(
     run_dir: str,
     labels_dir: str,
@@ -294,6 +368,8 @@ def label_run_chunked(
     pre_slop: int,
     post_slop: int,
     chunksize: int,
+    auto_halfday_shift: bool,
+    shift_sample_rows: int,
 ) -> str:
     run_dir = run_dir.rstrip("/")
     merged_csv = os.path.join(run_dir, "merged.csv")
@@ -306,15 +382,39 @@ def label_run_chunked(
     lab_any = load_labels_for_day(labels_dir, day)
 
     rmin, rmax = run_time_range(merged_csv)
-    offset = compute_offset(rmin, float(lab_any["ts"].min()))
-
+    base_offset = compute_offset(rmin, float(lab_any["ts"].min()))
     tol_s = int(max(0, max(pre_slop, post_slop)))
 
-    print(f"[*] {run_dir}: using offset={offset}s tol={tol_s}s chunksize={chunksize} "
-          f"(run_ts={rmin:.0f}..{rmax:.0f})")
+    halfday_shift = 0
+    offset = base_offset
+
+    if auto_halfday_shift:
+        halfday_shift, offset = choose_halfday_shift(
+            merged_csv=merged_csv,
+            lab_any=lab_any,
+            run_ts_min=rmin,
+            run_ts_max=rmax,
+            base_offset=base_offset,
+            tol_s=tol_s,
+            sample_rows=shift_sample_rows,
+        )
+        print(f"[*] {run_dir}: chose halfday_shift={halfday_shift}s offset={offset}s")
+
+    print(
+        f"[*] {run_dir}: run_ts={rmin:.0f}..{rmax:.0f} day={day} "
+        f"halfday_shift={halfday_shift}s offset={offset}s window=[-{pre_slop},+{post_slop}] chunksize={chunksize}"
+    )
+
+    # Apply shift to labels for the full run
+    lab_any = lab_any.copy()
+    lab_any["ts"] = lab_any["ts"].astype("float64") + float(halfday_shift)
 
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, f"{os.path.basename(run_dir)}_labeled.parquet")
+
+    # IMPORTANT: avoid stale schema issues from previous runs
+    if os.path.exists(out_path):
+        os.remove(out_path)
 
     required_cols = ["ts", "duration", "orig_h", "orig_p", "resp_h", "resp_p", "proto"]
     extra_keep = [
@@ -361,11 +461,15 @@ def label_run_chunked(
 
         joined = merge_two_pass(chunk, lab_any, offset=offset, tol_s=tol_s)
 
+        # Force stable schema across chunks
         joined["label_family"] = joined["label_family"].fillna("Unknown").astype(str)
         joined["label_raw"] = joined["label_raw"].fillna("Unknown").astype(str)
+        joined["is_attack"] = pd.to_numeric(joined.get("is_attack", 0), errors="coerce").fillna(0).astype("int8")
+
         joined["day"] = day
         joined["run_id"] = os.path.basename(run_dir)
         joined["label_time_offset_sec"] = int(offset)
+        joined["label_halfday_shift_sec"] = int(halfday_shift)
         joined["label_window_pre_slop_sec"] = int(pre_slop)
         joined["label_window_post_slop_sec"] = int(post_slop)
 
@@ -392,8 +496,10 @@ def label_run_chunked(
 
     pct = (known / total * 100.0) if total else 0.0
     apct = (attacks / total * 100.0) if total else 0.0
-    print(f"[*] {run_dir}: labeled {known}/{total} ({pct:.2f}%) attacks={attacks} ({apct:.2f}%) "
-          f"day={day} offset={offset}s -> {out_path}")
+    print(
+        f"[*] {run_dir}: labeled {known}/{total} ({pct:.2f}%) attacks={attacks} ({apct:.2f}%) "
+        f"day={day} halfday_shift={halfday_shift}s offset={offset}s -> {out_path}"
+    )
 
     return out_path
 
@@ -403,6 +509,9 @@ def combine_parquets(out_files: List[str], combined_out: str) -> None:
     import pyarrow.parquet as pq
 
     os.makedirs(os.path.dirname(combined_out), exist_ok=True)
+
+    if os.path.exists(combined_out):
+        os.remove(combined_out)
 
     writer = None
     rows = 0
@@ -433,6 +542,9 @@ def main():
     ap.add_argument("--combined_out", default="data/datasets/cicids2017_multiclass_zeek_ebpf.parquet", help="combined parquet output path")
     ap.add_argument("--no_combine", action="store_true", help="only write per-run outputs, skip combined parquet")
 
+    ap.add_argument("--auto_halfday_shift", action="store_true", help="try shifts {0,±12h} to improve alignment")
+    ap.add_argument("--shift_sample_rows", type=int, default=200000, help="rows to sample from merged.csv when choosing halfday shift")
+
     args = ap.parse_args()
 
     outs: List[str] = []
@@ -450,6 +562,8 @@ def main():
                 pre_slop=args.pre_slop,
                 post_slop=args.post_slop,
                 chunksize=args.chunksize,
+                auto_halfday_shift=args.auto_halfday_shift,
+                shift_sample_rows=args.shift_sample_rows,
             )
         )
 
