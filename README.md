@@ -184,18 +184,18 @@ The script prints merge stats and writes the merged dataset to your `--out` path
 for DAY in Monday Tuesday Wednesday Thursday Friday; do
   echo "Processing $DAY..."
 
-  if ! REPLAY_IFACE=veth0 bash ubuntu/run_capture.sh "${DAY}-WorkingHours.pcap" veth1 100; then
-    echo "[!] capture failed for $DAY, skipping merge"
-    continue
-  fi
+  LOG="$(mktemp)"
+  REPLAY_IFACE=veth0 bash ubuntu/run_capture.sh "${DAY}-WorkingHours.pcap" veth1 topspeed | tee "$LOG"
 
-  RUN="$(ls -1dt data/runs/* | head -n 1)"
+  OUT="$(awk -F= '/^RUN_DIR=/{print $2; exit}' "$LOG")"
+  rm -f "$LOG"
+
   python3 ubuntu/merge_zeek_ebpf.py \
-    --zeek_conn "$RUN/zeek/conn.csv" \
-    --ebpf_agg  "$RUN/ebpf_agg.jsonl" \
-    --out       "$RUN/merged.csv" \
+    --zeek_conn "$OUT/zeek/conn.csv" \
+    --ebpf_agg  "$OUT/ebpf_agg.jsonl" \
+    --out       "$OUT/merged.csv" \
     --time_slop 5
-done
+done 
 ```
 
 **Expected output**:
