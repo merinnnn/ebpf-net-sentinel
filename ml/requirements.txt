@@ -3,3 +3,4 @@ pyarrow
 scikit-learn
 joblib
 matplotlib
+shap
