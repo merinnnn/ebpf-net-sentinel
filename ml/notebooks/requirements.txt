@@ -6,3 +6,4 @@ joblib
 matplotlib
 jupyterlab
 ipykernel
+pyarrow
