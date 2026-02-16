@@ -179,6 +179,13 @@ def main():
     print(f"[*] Test set: {len(X_test)} samples")
     print(f"  BENIGN: {(y_test == 0).sum()} ({(y_test == 0).mean()*100:.1f}%)")
     print(f"  ATTACK: {(y_test == 1).sum()} ({(y_test == 1).mean()*100:.1f}%)")
+
+    # drop all-null columns (prevents sklearn imputer warning)
+    all_null = [c for c in X_train.columns if X_train[c].isna().all()]
+    if all_null:
+        X_train = X_train.drop(columns=all_null)
+        X_val = X_val.drop(columns=all_null, errors="ignore")
+        X_test = X_test.drop(columns=all_null, errors="ignore")
     
     # Build preprocessor
     pre, numeric_cols = make_preprocessor(X_train)
