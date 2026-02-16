@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
+from datetime import datetime
 import argparse
 import json
 import os
-from datetime import datetime
-
 import joblib
 import numpy as np
 import pandas as pd
@@ -23,7 +22,6 @@ from sklearn.metrics import (
     confusion_matrix,
     classification_report,
 )
-
 LABEL_COL = "label_family"
 IS_ATTACK_COL = "is_attack"
 DAY_COL = "day"
@@ -170,9 +168,17 @@ def main():
     X_val, y_val, labels_val, day_val = split_xy_binary(val_df)
     X_test, y_test, labels_test, day_test = split_xy_binary(test_df)
     
-    print(f"Training set: {len(X_train)} samples")
+    print(f"[*] Training set: {len(X_train)} samples")
     print(f"  BENIGN: {(y_train == 0).sum()} ({(y_train == 0).mean()*100:.1f}%)")
     print(f"  ATTACK: {(y_train == 1).sum()} ({(y_train == 1).mean()*100:.1f}%)")
+    
+    print(f"[*] Validation set: {len(X_val)} samples")
+    print(f"  BENIGN: {(y_val == 0).sum()} ({(y_val == 0).mean()*100:.1f}%)")
+    print(f"  ATTACK: {(y_val == 1).sum()} ({(y_val == 1).mean()*100:.1f}%)")
+    
+    print(f"[*] Test set: {len(X_test)} samples")
+    print(f"  BENIGN: {(y_test == 0).sum()} ({(y_test == 0).mean()*100:.1f}%)")
+    print(f"  ATTACK: {(y_test == 1).sum()} ({(y_test == 1).mean()*100:.1f}%)")
     
     # Build preprocessor
     pre, numeric_cols = make_preprocessor(X_train)
@@ -197,7 +203,7 @@ def main():
         ("clf", model),
     ])
     
-    print("\nTraining Isolation Forest...")
+    print("\n[*] Training Isolation Forest...")
     pipe.fit(X_train_benign)
     
     # Predict (IF returns -1 for outliers/attacks, 1 for inliers/benign)
@@ -218,18 +224,18 @@ def main():
     scores_test = get_scores(X_test)
     
     # Evaluate
-    print("\nVALIDATION METRICS:")
+    print("\n[*] VALIDATION METRICS:")
     val_metrics = evaluate_binary(y_val.to_numpy(), y_val_pred, scores_val)
     for k, v in val_metrics.items():
         print(f"  {k}: {v:.4f}" if v is not None else f"  {k}: N/A")
     
-    print("\nTEST METRICS:")
+    print("\n[*] TEST METRICS:")
     test_metrics = evaluate_binary(y_test.to_numpy(), y_test_pred, scores_test)
     for k, v in test_metrics.items():
         print(f"  {k}: {v:.4f}" if v is not None else f"  {k}: N/A")
     
     # Per-attack-type detection
-    print("\nPER-ATTACK DETECTION (TEST):")
+    print("\n[*] PER-ATTACK DETECTION (TEST):")
     per_attack = per_attack_metrics(labels_test, y_test.to_numpy(), y_test_pred)
     for attack, stats in sorted(per_attack.items()):
         print(f"  {attack:15s}: {stats['detected']:4d}/{stats['count']:4d} "
