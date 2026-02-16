@@ -12,6 +12,19 @@ import matplotlib.pyplot as plt
 import joblib
 from sklearn.inspection import permutation_importance
 
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    message="X has feature names, but .* was fitted without feature names",
+    category=UserWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message="X does not have valid feature names, but .* was fitted with feature names",
+    category=UserWarning,
+)
+
+
 def categorize_features(feature_names):
     """Categorize features as eBPF vs baseline"""
     ebpf_features = []
