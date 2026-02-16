@@ -17,6 +17,46 @@ echo "  data/datasets/splits_zeek_only_primary/"
 echo "  data/datasets/splits_zeek_plus_ebpf_primary/"
 echo ""
 
+# Path to your merged dataset produced by ubuntu scripts
+MERGED_PARQUET="${MERGED_PARQUET:-data/datasets/cicids2017_multiclass_zeek_ebpf.parquet}"
+
+ZEEK_ONLY_PARQUET="data/datasets/cicids2017_multiclass_zeek_only.parquet"
+ZEEK_EBPF_PARQUET="data/datasets/cicids2017_multiclass_zeek_plus_ebpf.parquet"
+
+echo "[*] Checking merged parquet: $MERGED_PARQUET"
+if [ ! -f "$MERGED_PARQUET" ]; then
+  echo "[x] ERROR: merged parquet not found: $MERGED_PARQUET"
+  echo "Make sure the ubuntu pipeline has produced it."
+  exit 1
+fi
+
+echo "[*] Building baseline/enhanced datasets"
+python3 ml/core/make_datasets.py \
+  --in_parquet "$MERGED_PARQUET" \
+  --out_baseline "$ZEEK_ONLY_PARQUET" \
+  --out_enhanced "$ZEEK_EBPF_PARQUET" \
+  --report_dir data/reports/make_datasets
+
+echo "[+] Datasets ready:"
+echo "    baseline: $ZEEK_ONLY_PARQUET"
+echo "    enhanced: $ZEEK_EBPF_PARQUET"
+echo ""
+
+echo "[*] Creating primary splits (baseline)"
+python3 ml/core/split_by_day.py \
+  --in_parquet "$ZEEK_ONLY_PARQUET" \
+  --out_dir data/datasets/splits_zeek_only_primary \
+  --split primary
+
+echo "[*] Creating primary splits (enhanced)"
+python3 ml/core/split_by_day.py \
+  --in_parquet "$ZEEK_EBPF_PARQUET" \
+  --out_dir data/datasets/splits_zeek_plus_ebpf_primary \
+  --split primary
+
+echo "[+] Splits created"
+echo ""
+
 # Check prerequisites
 if [ ! -d "data/datasets/splits_zeek_only_primary" ]; then
     echo "[x] ERROR: Baseline splits not found!"
