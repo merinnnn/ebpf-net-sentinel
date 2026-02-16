@@ -12,8 +12,6 @@ import matplotlib.pyplot as plt
 import joblib
 from sklearn.inspection import permutation_importance
 
-from pathlib import Path
-
 def categorize_features(feature_names):
     """Categorize features as eBPF vs baseline"""
     ebpf_features = []
@@ -27,31 +25,39 @@ def categorize_features(feature_names):
     
     return ebpf_features, baseline_features
 
-
 def get_feature_names(pipe, X_sample):
     """Extract feature names from pipeline"""
     # Get numeric columns from preprocessor
-    if hasattr(pipe.named_steps['pre'], 'transformers_'):
-        for name, trans, cols in pipe.named_steps['pre'].transformers_:
-            if name == 'num':
-                return list(cols)
+    if hasattr(pipe, "named_steps") and 'pre' in getattr(pipe, "named_steps", {}):
+        if hasattr(pipe.named_steps['pre'], 'transformers_'):
+            for name, trans, cols in pipe.named_steps['pre'].transformers_:
+                if name == 'num':
+                    return list(cols)
     return []
-
 
 def compute_permutation_importance(pipe, X_test, y_test, feature_names, n_repeats=10):
     """Compute permutation-based feature importance"""
     print(f"[*] Computing permutation importance ({n_repeats} repeats)")
-    
+
+    n = len(X_test)
+
     # Sample if too large
-    if len(X_test) > 5000:
-        idx = np.random.choice(len(X_test), 5000, replace=False)
-        X_sample = X_test.iloc[idx]
-        y_sample = y_test.iloc[idx] if isinstance(y_test, pd.Series) else y_test[idx]
+    if n > 5000:
+        idx = np.random.choice(n, 5000, replace=False)
+
+        if isinstance(X_test, pd.DataFrame):
+            X_sample = X_test.iloc[idx]
+        else:
+            X_sample = X_test[idx]
+
+        if isinstance(y_test, pd.Series):
+            y_sample = y_test.iloc[idx]
+        else:
+            y_sample = y_test[idx]
     else:
         X_sample = X_test
         y_sample = y_test
-    
-    # Compute importance
+
     result = permutation_importance(
         pipe, X_sample, y_sample,
         n_repeats=n_repeats,
@@ -59,9 +65,8 @@ def compute_permutation_importance(pipe, X_test, y_test, feature_names, n_repeat
         n_jobs=-1,
         scoring='f1'
     )
-    
-    return result
 
+    return result
 
 def plot_feature_importance(importances, feature_names, out_png, top_k=20):
     """Plot feature importance"""
@@ -77,7 +82,6 @@ def plot_feature_importance(importances, feature_names, out_png, top_k=20):
     plt.tight_layout()
     plt.savefig(out_png, dpi=200)
     plt.close()
-
 
 def main():
     ap = argparse.ArgumentParser()
@@ -96,6 +100,15 @@ def main():
     print("[*] Loading models...")
     pipe_baseline = joblib.load(args.model_baseline)
     pipe_ebpf = joblib.load(args.model_ebpf)
+
+    # unwrap dict-bundles into estimator + scaler + features
+    def unwrap(bundle):
+        if isinstance(bundle, dict) and "model" in bundle:
+            return bundle.get("model"), bundle.get("scaler"), bundle.get("features")
+        return bundle, None, None
+
+    model_baseline, scaler_baseline, feats_baseline = unwrap(pipe_baseline)
+    model_ebpf, scaler_ebpf, feats_ebpf = unwrap(pipe_ebpf)
     
     # Load test data
     print("[*] Loading test data...")
@@ -114,10 +127,12 @@ def main():
     
     X_baseline = test_baseline.drop(columns=drop_cols, errors='ignore')
     X_ebpf = test_ebpf.drop(columns=drop_cols, errors='ignore')
-    
-    # Get feature names
-    features_baseline = get_feature_names(pipe_baseline, X_baseline)
-    features_ebpf = get_feature_names(pipe_ebpf, X_ebpf)
+
+    # use saved feature list if available
+    if isinstance(feats_baseline, (list, tuple)) and len(feats_baseline) > 0:
+        X_baseline = X_baseline[[c for c in feats_baseline if c in X_baseline.columns]]
+    if isinstance(feats_ebpf, (list, tuple)) and len(feats_ebpf) > 0:
+        X_ebpf = X_ebpf[[c for c in feats_ebpf if c in X_ebpf.columns]]
     
     # Filter to numeric only
     numeric_baseline = [c for c in X_baseline.columns if X_baseline[c].dtype in ['int64', 'float64']]
@@ -125,6 +140,23 @@ def main():
     
     X_baseline = X_baseline[numeric_baseline]
     X_ebpf = X_ebpf[numeric_ebpf]
+
+    # apply saved scaler if present
+    if scaler_baseline is not None:
+        X_baseline_in = pd.DataFrame(
+            scaler_baseline.transform(X_baseline),
+            columns=X_baseline.columns
+        )
+    else:
+        X_baseline_in = X_baseline
+
+    if scaler_ebpf is not None:
+        X_ebpf_in = pd.DataFrame(
+            scaler_ebpf.transform(X_ebpf),
+            columns=X_ebpf.columns
+        )
+    else:
+        X_ebpf_in = X_ebpf
     
     print(f"\n[*] Baseline features: {len(numeric_baseline)}")
     print(f"[*] eBPF features: {len(numeric_ebpf)}")
@@ -132,13 +164,13 @@ def main():
     # Compute importance for baseline
     print("\n[*] BASELINE MODEL:")
     result_baseline = compute_permutation_importance(
-        pipe_baseline, X_baseline, y_baseline, numeric_baseline, args.n_repeats
+        model_baseline, X_baseline_in, y_baseline, numeric_baseline, args.n_repeats
     )
     
     # Compute importance for eBPF
     print("\n[*] eBPF-ENHANCED MODEL:")
     result_ebpf = compute_permutation_importance(
-        pipe_ebpf, X_ebpf, y_ebpf, numeric_ebpf, args.n_repeats
+        model_ebpf, X_ebpf_in, y_ebpf, numeric_ebpf, args.n_repeats
     )
     
     # Plot
@@ -190,7 +222,7 @@ def main():
     
     print(f"\n[*] Top {args.top_k} features (eBPF-enhanced):")
     for item in top_ebpf[:10]:
-        is_ebpf = "⭐" if item['feature'] in ebpf_feats else "  "
+        is_ebpf = "W" if item['feature'] in ebpf_feats else "  "
         print(f"  {item['rank']:2d}. {item['feature']:30s}  "
               f"Importance={item['importance']:.4f} ±{item['std']:.4f} {is_ebpf}")
     
