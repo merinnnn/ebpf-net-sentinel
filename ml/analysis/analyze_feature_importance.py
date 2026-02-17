@@ -1,99 +1,87 @@
 #!/usr/bin/env python3
 """
-Feature Importance Analysis for Isolation Forest using permutation importance
-(SHAP TreeExplainer doesn't work well with IF anomaly scores)
+Permutation feature importance for two saved models (baseline vs eBPF).
+
+Robust to:
+- different feature sets (baseline 10 vs enhanced 18)
+- models saved as dict {"model","scaler","features",...} (our training format)
+- missing columns in test parquet (will error with a clear message)
+
+Outputs:
+- feature_importance_summary.json
+- plots (bar charts) for each model
 """
-import argparse
-import json
-import os
+import argparse, json, os
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import joblib
 from sklearn.inspection import permutation_importance
+from sklearn.pipeline import Pipeline
 
-import warnings
-warnings.filterwarnings(
-    "ignore",
-    message="X has feature names, but .* was fitted without feature names",
-    category=UserWarning,
-)
-warnings.filterwarnings(
-    "ignore",
-    message="X does not have valid feature names, but .* was fitted with feature names",
-    category=UserWarning,
-)
+def load_pack(path: str):
+    import joblib
+    pack = joblib.load(path)
+    if isinstance(pack, dict) and "model" in pack:
+        return pack
+    # allow raw estimator
+    return {"model": pack, "scaler": None, "features": None}
 
+def select_X(df: pd.DataFrame, features):
+    missing = [c for c in features if c not in df.columns]
+    if missing:
+        raise ValueError(f"Test data is missing expected features: {missing}")
+    return df[features].copy()
 
-def categorize_features(feature_names):
-    """Categorize features as eBPF vs baseline"""
-    ebpf_features = []
-    baseline_features = []
-    
-    for feat in feature_names:
-        if any(kw in feat.lower() for kw in ['ebpf', 'pid', 'uid', 'comm']):
-            ebpf_features.append(feat)
-        else:
-            baseline_features.append(feat)
-    
-    return ebpf_features, baseline_features
+def compute_perm(model_pack, df_test: pd.DataFrame, y: np.ndarray, n_repeats: int, random_state: int):
+    model = model_pack["model"]
+    scaler = model_pack.get("scaler")
+    features = model_pack.get("features")
+    if features is None:
+        # fallback: use numeric columns except labels
+        drop_cols = {"label","label_family","is_attack","day"}
+        features = [c for c in df_test.columns if c not in drop_cols and pd.api.types.is_numeric_dtype(df_test[c])]
+    X = select_X(df_test, features)
 
-def get_feature_names(pipe, X_sample):
-    """Extract feature names from pipeline"""
-    # Get numeric columns from preprocessor
-    if hasattr(pipe, "named_steps") and 'pre' in getattr(pipe, "named_steps", {}):
-        if hasattr(pipe.named_steps['pre'], 'transformers_'):
-            for name, trans, cols in pipe.named_steps['pre'].transformers_:
-                if name == 'num':
-                    return list(cols)
-    return []
-
-def compute_permutation_importance(pipe, X_test, y_test, feature_names, n_repeats=10):
-    """Compute permutation-based feature importance"""
-    print(f"[*] Computing permutation importance ({n_repeats} repeats)")
-
-    n = len(X_test)
-
-    # Sample if too large
-    if n > 5000:
-        idx = np.random.choice(n, 5000, replace=False)
-
-        if isinstance(X_test, pd.DataFrame):
-            X_sample = X_test.iloc[idx]
-        else:
-            X_sample = X_test[idx]
-
-        if isinstance(y_test, pd.Series):
-            y_sample = y_test.iloc[idx]
-        else:
-            y_sample = y_test[idx]
+    if scaler is not None:
+        est = Pipeline([("scaler", scaler), ("model", model)])
+        # Use DataFrame so scaler gets arrays but keeps column order; pipeline handles it.
+        X_use = X
     else:
-        X_sample = X_test
-        y_sample = y_test
+        est = model
+        X_use = X
 
-    result = permutation_importance(
-        pipe, X_sample, y_sample,
+    res = permutation_importance(
+        est, X_use, y,
         n_repeats=n_repeats,
-        random_state=42,
+        random_state=random_state,
+        scoring="roc_auc",
         n_jobs=-1,
-        scoring='f1'
     )
 
-    return result
+    importances = res.importances_mean
+    stds = res.importances_std
+    order = np.argsort(importances)[::-1]
+    rows = []
+    for i in order:
+        rows.append({
+            "feature": str(features[i]),
+            "importance_mean": float(importances[i]),
+            "importance_std": float(stds[i]),
+        })
+    return rows
 
-def plot_feature_importance(importances, feature_names, out_png, top_k=20):
-    """Plot feature importance"""
-    # Get top features
-    indices = np.argsort(importances)[::-1][:top_k]
-    
-    plt.figure(figsize=(10, 8))
-    plt.barh(range(len(indices)), importances[indices])
-    plt.yticks(range(len(indices)), [feature_names[i] for i in indices])
-    plt.xlabel('Importance (F1 score decrease)')
-    plt.title(f'Top {top_k} Most Important Features')
-    plt.gca().invert_yaxis()
+def plot_top(rows, out_png: Path, top_k: int):
+    top = rows[:top_k]
+    feats = [r["feature"] for r in top][::-1]
+    vals = [r["importance_mean"] for r in top][::-1]
+    errs = [r["importance_std"] for r in top][::-1]
+
+    plt.figure(figsize=(10, max(4, 0.35*len(feats))))
+    plt.barh(feats, vals, xerr=errs)
+    plt.xlabel("Permutation importance (ROC-AUC drop)")
     plt.tight_layout()
-    plt.savefig(out_png, dpi=200)
+    plt.savefig(out_png, dpi=160)
     plt.close()
 
 def main():
@@ -102,174 +90,41 @@ def main():
     ap.add_argument("--model_ebpf", required=True)
     ap.add_argument("--test_data_baseline", required=True)
     ap.add_argument("--test_data_ebpf", required=True)
-    ap.add_argument("--out_dir", default="data/reports/feature_importance")
-    ap.add_argument("--top_k", type=int, default=20)
+    ap.add_argument("--out_dir", required=True)
     ap.add_argument("--n_repeats", type=int, default=10)
+    ap.add_argument("--top_k", type=int, default=20)
+    ap.add_argument("--random_state", type=int, default=42)
     args = ap.parse_args()
-    
-    os.makedirs(args.out_dir, exist_ok=True)
-    
-    # Load models
-    print("[*] Loading models...")
-    pipe_baseline = joblib.load(args.model_baseline)
-    pipe_ebpf = joblib.load(args.model_ebpf)
 
-    # unwrap dict-bundles into estimator + scaler + features
-    def unwrap(bundle):
-        if isinstance(bundle, dict) and "model" in bundle:
-            return bundle.get("model"), bundle.get("scaler"), bundle.get("features")
-        return bundle, None, None
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    model_baseline, scaler_baseline, feats_baseline = unwrap(pipe_baseline)
-    model_ebpf, scaler_ebpf, feats_ebpf = unwrap(pipe_ebpf)
-    
-    # Load test data
-    print("[*] Loading test data...")
-    test_baseline = pd.read_parquet(args.test_data_baseline)
-    test_ebpf = pd.read_parquet(args.test_data_ebpf)
-    
-    # Prepare features and labels
-    y_baseline = (test_baseline['is_attack'] == 1).astype(int)
-    y_ebpf = (test_ebpf['is_attack'] == 1).astype(int)
-    
-    drop_cols = ['label_family', 'is_attack', 'day', 'label_raw', 
-                 'label_time_offset_sec', 'label_halfday_shift_sec',
-                 'label_window_pre_slop_sec', 'label_window_post_slop_sec',
-                 'run_id', 'ts', 'start_ts', 'end_ts', 't_end',
-                 'orig_h', 'resp_h', 'src_ip', 'dst_ip', 'k']
-    
-    X_baseline = test_baseline.drop(columns=drop_cols, errors='ignore')
-    X_ebpf = test_ebpf.drop(columns=drop_cols, errors='ignore')
+    pack_b = load_pack(args.model_baseline)
+    pack_e = load_pack(args.model_ebpf)
 
-    # use saved feature list if available
-    if isinstance(feats_baseline, (list, tuple)) and len(feats_baseline) > 0:
-        X_baseline = X_baseline[[c for c in feats_baseline if c in X_baseline.columns]]
-    if isinstance(feats_ebpf, (list, tuple)) and len(feats_ebpf) > 0:
-        X_ebpf = X_ebpf[[c for c in feats_ebpf if c in X_ebpf.columns]]
-    
-    # Filter to numeric only
-    numeric_baseline = [c for c in X_baseline.columns if X_baseline[c].dtype in ['int64', 'float64']]
-    numeric_ebpf = [c for c in X_ebpf.columns if X_ebpf[c].dtype in ['int64', 'float64']]
-    
-    X_baseline = X_baseline[numeric_baseline]
-    X_ebpf = X_ebpf[numeric_ebpf]
+    df_b = pd.read_parquet(args.test_data_baseline)
+    df_e = pd.read_parquet(args.test_data_ebpf)
 
-    # apply saved scaler if present
-    if scaler_baseline is not None:
-        X_baseline_in = pd.DataFrame(
-            scaler_baseline.transform(X_baseline),
-            columns=X_baseline.columns
-        )
-    else:
-        X_baseline_in = X_baseline
+    # We evaluate importance for binary ATTACK vs BENIGN.
+    if "is_attack" not in df_b.columns or "is_attack" not in df_e.columns:
+        raise SystemExit("test parquet must contain is_attack column (0/1)")
 
-    if scaler_ebpf is not None:
-        X_ebpf_in = pd.DataFrame(
-            scaler_ebpf.transform(X_ebpf),
-            columns=X_ebpf.columns
-        )
-    else:
-        X_ebpf_in = X_ebpf
-    
-    print(f"\n[*] Baseline features: {len(numeric_baseline)}")
-    print(f"[*] eBPF features: {len(numeric_ebpf)}")
-    
-    # Compute importance for baseline
-    print("\n[*] BASELINE MODEL:")
-    result_baseline = compute_permutation_importance(
-        model_baseline, X_baseline_in, y_baseline, numeric_baseline, args.n_repeats
-    )
-    
-    # Compute importance for eBPF
-    print("\n[*] eBPF-ENHANCED MODEL:")
-    result_ebpf = compute_permutation_importance(
-        model_ebpf, X_ebpf_in, y_ebpf, numeric_ebpf, args.n_repeats
-    )
-    
-    # Plot
-    plot_feature_importance(
-        result_baseline.importances_mean,
-        numeric_baseline,
-        os.path.join(args.out_dir, "importance_baseline.png"),
-        args.top_k
-    )
-    
-    plot_feature_importance(
-        result_ebpf.importances_mean,
-        numeric_ebpf,
-        os.path.join(args.out_dir, "importance_ebpf.png"),
-        args.top_k
-    )
-    
-    # Get top features
-    top_baseline = []
-    indices = np.argsort(result_baseline.importances_mean)[::-1][:args.top_k]
-    for rank, idx in enumerate(indices, 1):
-        top_baseline.append({
-            "rank": rank,
-            "feature": numeric_baseline[idx],
-            "importance": float(result_baseline.importances_mean[idx]),
-            "std": float(result_baseline.importances_std[idx]),
-        })
-    
-    top_ebpf = []
-    indices = np.argsort(result_ebpf.importances_mean)[::-1][:args.top_k]
-    for rank, idx in enumerate(indices, 1):
-        top_ebpf.append({
-            "rank": rank,
-            "feature": numeric_ebpf[idx],
-            "importance": float(result_ebpf.importances_mean[idx]),
-            "std": float(result_ebpf.importances_std[idx]),
-        })
-    
-    # Categorize
-    ebpf_feats, baseline_feats = categorize_features(numeric_ebpf)
-    top_ebpf_names = [x['feature'] for x in top_ebpf]
-    ebpf_in_top = [f for f in top_ebpf_names if f in ebpf_feats]
-    
-    # Print results
-    print(f"\n[*] Top {args.top_k} features (BASELINE):")
-    for item in top_baseline[:10]:
-        print(f"  {item['rank']:2d}. {item['feature']:30s}  "
-              f"Importance={item['importance']:.4f} ±{item['std']:.4f}")
-    
-    print(f"\n[*] Top {args.top_k} features (eBPF-enhanced):")
-    for item in top_ebpf[:10]:
-        is_ebpf = "W" if item['feature'] in ebpf_feats else "  "
-        print(f"  {item['rank']:2d}. {item['feature']:30s}  "
-              f"Importance={item['importance']:.4f} ±{item['std']:.4f} {is_ebpf}")
-    
-    print(f"\n[*] eBPF features in top-{args.top_k}: {len(ebpf_in_top)}/{len(ebpf_feats)}")
-    for feat in ebpf_in_top:
-        print(f"  - {feat}")
-    
-    # Save results
-    results = {
-        "baseline": {
-            "model_path": args.model_baseline,
-            "num_features": len(numeric_baseline),
-            "top_features": top_baseline,
-        },
-        "ebpf": {
-            "model_path": args.model_ebpf,
-            "num_features": len(numeric_ebpf),
-            "top_features": top_ebpf,
-            "feature_categories": {
-                "ebpf_count": len(ebpf_feats),
-                "baseline_count": len(baseline_feats),
-                "ebpf_in_topk": len(ebpf_in_top),
-                "ebpf_features_in_topk": ebpf_in_top,
-            },
-        },
+    y_b = df_b["is_attack"].astype(int).to_numpy()
+    y_e = df_e["is_attack"].astype(int).to_numpy()
+
+    rows_b = compute_perm(pack_b, df_b, y_b, args.n_repeats, args.random_state)
+    rows_e = compute_perm(pack_e, df_e, y_e, args.n_repeats, args.random_state)
+
+    plot_top(rows_b, out_dir/"baseline_perm_importance.png", args.top_k)
+    plot_top(rows_e, out_dir/"ebpf_perm_importance.png", args.top_k)
+
+    summary = {
+        "baseline": rows_b[:args.top_k],
+        "ebpf": rows_e[:args.top_k],
     }
-    
-    summary_path = os.path.join(args.out_dir, "feature_importance_summary.json")
-    with open(summary_path, "w") as f:
-        json.dump(results, f, indent=2)
-    
-    print(f"\n[*] Summary saved: {summary_path}")
-    print(f"[*] Plots saved in: {args.out_dir}")
-
+    (out_dir/"feature_importance_summary.json").write_text(json.dumps(summary, indent=2))
+    print(f"[*] Summary saved: {out_dir/'feature_importance_summary.json'}")
+    print(f"[*] Plots saved in: {out_dir}")
 
 if __name__ == "__main__":
     main()
