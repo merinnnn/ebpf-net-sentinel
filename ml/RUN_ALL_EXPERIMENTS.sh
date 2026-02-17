@@ -46,36 +46,21 @@ echo "[*] Creating primary splits (baseline)"
 python3 ml/data_prep/split_days_auto.py \
   --in_parquet "$ZEEK_ONLY_PARQUET" \
   --out_dir data/datasets/splits_zeek_only_primary \
-  --protocol day_holdout \
-  --min_attacks_train 5000 \
-  --min_attacks_val 1000 \
-  --min_attacks_test 1000
+  --protocol within_day_time \
+  --train_frac 0.70 \
+  --val_frac 0.15 \
+  --test_frac 0.15
 
 echo "[*] Creating primary splits (enhanced)"
 python3 ml/data_prep/split_days_auto.py \
   --in_parquet "$ZEEK_EBPF_PARQUET" \
   --out_dir data/datasets/splits_zeek_plus_ebpf_primary \
-  --protocol day_holdout \
-  --min_attacks_train 5000 \
-  --min_attacks_val 1000 \
-  --min_attacks_test 1000
+  --protocol within_day_time \
+  --train_frac 0.70 \
+  --val_frac 0.15 \
+  --test_frac 0.15
 
 echo "[+] Splits created"
-echo ""
-
-# Check prerequisites
-if [ ! -d "data/datasets/splits_zeek_only_primary" ]; then
-    echo "[x] ERROR: Baseline splits not found!"
-    echo "Run: python3 ml/core/split_by_day.py ..."
-    exit 1
-fi
-
-if [ ! -d "data/datasets/splits_zeek_plus_ebpf_primary" ]; then
-    echo "[x] ERROR: eBPF splits not found!"
-    exit 1
-fi
-
-echo "[*] Prerequisites checked"
 echo ""
 
 # Create output directories
