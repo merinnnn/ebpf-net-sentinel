@@ -2,7 +2,7 @@
 # Complete experimental pipeline
 # Run this script to execute all experiments automatically
 
-set -e
+set -euo pipefail
 
 echo "eBPF Network Anomaly Detection - Full Pipeline"
 
@@ -43,16 +43,22 @@ echo "    enhanced: $ZEEK_EBPF_PARQUET"
 echo ""
 
 echo "[*] Creating primary splits (baseline)"
-python3 ml/core/split_by_day.py \
+python3 ml/core/split_days_auto.py \
   --in_parquet "$ZEEK_ONLY_PARQUET" \
   --out_dir data/datasets/splits_zeek_only_primary \
-  --split primary
+  --protocol day_holdout \
+  --min_attacks_train 5000 \
+  --min_attacks_val 1000 \
+  --min_attacks_test 1000
 
 echo "[*] Creating primary splits (enhanced)"
-python3 ml/core/split_by_day.py \
+python3 ml/core/split_days_auto.py \
   --in_parquet "$ZEEK_EBPF_PARQUET" \
   --out_dir data/datasets/splits_zeek_plus_ebpf_primary \
-  --split primary
+  --protocol day_holdout \
+  --min_attacks_train 5000 \
+  --min_attacks_val 1000 \
+  --min_attacks_test 1000
 
 echo "[+] Splits created"
 echo ""
@@ -96,9 +102,10 @@ python3 ml/core/train_random_forest.py \
   --run_name baseline_rf \
   --out_models_dir data/models \
   --out_reports_dir data/reports \
-  --n_estimators 200 \
-  --max_depth 20 \
-  --balance_classes
+  --n_estimators 400 \
+  --max_depth 24 \
+  --balance_classes \
+  --tune_threshold
 
 echo ""
 echo "[+] Experiment 2 complete"
@@ -125,9 +132,10 @@ python3 ml/core/train_random_forest.py \
   --run_name ebpf_rf \
   --out_models_dir data/models \
   --out_reports_dir data/reports \
-  --n_estimators 200 \
-  --max_depth 20 \
-  --balance_classes
+  --n_estimators 400 \
+  --max_depth 24 \
+  --balance_classes \
+  --tune_threshold
 
 echo ""
 echo "[+] Experiment 4 complete"
