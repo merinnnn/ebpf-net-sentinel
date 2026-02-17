@@ -51,16 +51,28 @@ def make_preprocessor(X_train: pd.DataFrame):
     # For Isolation Forest, we typically use only numeric features
     # Categorical features like IP addresses don't work well
     
-    numeric_cols = [
-        c
-        for c in X_train.columns
-        if X_train[c].dtype in ["int64", "float64", "int32", "float32"]
-        and not X_train[c].isna().all()
-    ]
+    numeric_cols = [c for c in X_train.columns 
+                    if X_train[c].dtype in ['int64', 'float64', 'int32', 'float32']]
     
     # Remove non-feature columns
     exclude = ['ts', 'start_ts', 'end_ts', 't_end', 'run_id']
     numeric_cols = [c for c in numeric_cols if c not in exclude]
+
+    # Drop columns that are entirely missing in the training split (avoids SimpleImputer warnings)
+    def drop_all_nan_cols(df: pd.DataFrame, cols):
+        kept, dropped = [], []
+        for c in cols:
+            if c in df.columns and df[c].notna().any():
+                kept.append(c)
+            else:
+                dropped.append(c)
+        return kept, dropped
+
+    kept, dropped = drop_all_nan_cols(X_train, numeric_cols)
+    if dropped:
+        print(f"[*] Dropping all-NaN columns: {dropped}")
+    numeric_cols = kept
+
     
     numeric = Pipeline(steps=[
         ("imputer", SimpleImputer(strategy="median")),
@@ -284,6 +296,7 @@ def main():
     print(f"\n[*] Saved model: {model_path}")
     print(f"[*] Saved confusion: {cm_png}")
     print(f"[*] Saved summary: {summary_path}")
+
 
 if __name__ == "__main__":
     main()
