@@ -27,7 +27,6 @@ IS_ATTACK_COL = "is_attack"
 DAY_COL = "day"
 RANDOM_SEED = 1337
 
-
 def split_xy_binary(df: pd.DataFrame, use_only_benign_for_train=True):
     """
     For Isolation Forest: train on BENIGN only, test on everything
@@ -46,7 +45,6 @@ def split_xy_binary(df: pd.DataFrame, use_only_benign_for_train=True):
                           'label_window_post_slop_sec'], errors='ignore')
     
     return X, y_binary, y_labels, day
-
 
 def make_preprocessor(X_train: pd.DataFrame):
     """Preprocessor for numeric features only (drop categoricals for IF)"""
@@ -76,7 +74,6 @@ def make_preprocessor(X_train: pd.DataFrame):
     
     return pre, numeric_cols
 
-
 def plot_confusion(cm: np.ndarray, labels: list, out_png: str):
     """Plot confusion matrix"""
     plt.figure(figsize=(8, 6))
@@ -105,7 +102,6 @@ def plot_confusion(cm: np.ndarray, labels: list, out_png: str):
     plt.savefig(out_png, dpi=200)
     plt.close()
 
-
 def evaluate_binary(y_true: np.ndarray, y_pred: np.ndarray, 
                    y_scores: np.ndarray = None):
     """Evaluate binary classification"""
@@ -123,7 +119,6 @@ def evaluate_binary(y_true: np.ndarray, y_pred: np.ndarray,
             metrics["roc_auc"] = None
     
     return metrics
-
 
 def per_attack_metrics(y_labels: pd.Series, y_true: np.ndarray, 
                        y_pred: np.ndarray):
@@ -145,7 +140,6 @@ def per_attack_metrics(y_labels: pd.Series, y_true: np.ndarray,
         }
     
     return results
-
 
 def main():
     ap = argparse.ArgumentParser()
@@ -183,13 +177,6 @@ def main():
     print(f"[*] Test set: {len(X_test)} samples")
     print(f"  BENIGN: {(y_test == 0).sum()} ({(y_test == 0).mean()*100:.1f}%)")
     print(f"  ATTACK: {(y_test == 1).sum()} ({(y_test == 1).mean()*100:.1f}%)")
-
-    # drop all-null columns (prevents sklearn imputer warning)
-    all_null = [c for c in X_train.columns if X_train[c].isna().all()]
-    if all_null:
-        X_train = X_train.drop(columns=all_null)
-        X_val = X_val.drop(columns=all_null, errors="ignore")
-        X_test = X_test.drop(columns=all_null, errors="ignore")
     
     # Build preprocessor
     pre, numeric_cols = make_preprocessor(X_train)
@@ -297,7 +284,6 @@ def main():
     print(f"\n[*] Saved model: {model_path}")
     print(f"[*] Saved confusion: {cm_png}")
     print(f"[*] Saved summary: {summary_path}")
-
 
 if __name__ == "__main__":
     main()

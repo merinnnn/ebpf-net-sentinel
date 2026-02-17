@@ -1,9 +1,0 @@
-bcc 
-pandas 
-numpy 
-scapy 
-scikit-learn 
-scipy
-numba 
-pytest
-llvmlite

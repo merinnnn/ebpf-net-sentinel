@@ -1,7 +1,0 @@
-joblib
-matplotlib
-numpy
-pandas
-scikit-learn
-scipy
-pyarrow

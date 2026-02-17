@@ -29,7 +29,7 @@ Most experiments take a `--splits_dir` that contains:
 
 Example:
 
-```
+```bash
 data/datasets/
   splits_zeek_only/
     train.parquet
@@ -52,7 +52,6 @@ By default experiments write to:
 
 The `--run_name` is used as a prefix for output filenames.
 
-
 ---
 
 ## How to Run Experiments
@@ -66,11 +65,11 @@ All commands below assume you are at the **repo root** (the folder that contains
 ## 0) Prepare data
 
 ```bash
-python3 ml/core/make_datasets.py --in_parquet data/datasets/cicids2017_multiclass_merged.parquet --out_baseline data/datasets/cicids2017_multiclass_zeek_only.parquet --out_enhanced data/datasets/cicids2017_multiclass_zeek_plus_ebpf.parquet --report_dir data/reports
+python3 ml/data_prep/make_datasets.py --in_parquet data/datasets/cicids2017_multiclass_merged.parquet --out_baseline data/datasets/cicids2017_multiclass_zeek_only.parquet --out_enhanced data/datasets/cicids2017_multiclass_zeek_plus_ebpf.parquet --report_dir data/reports
 
-python3 ml/core/split_by_day.py --in_parquet data/datasets/cicids2017_multiclass_zeek_only.parquet --out_dir data/datasets/splits_zeek_only_primary --split primary
+python3 ml/data_prep/split_by_day.py --in_parquet data/datasets/cicids2017_multiclass_zeek_only.parquet --out_dir data/datasets/splits_zeek_only_primary --split primary
 
-python3 ml/core/split_by_day.py --in_parquet data/datasets/cicids2017_multiclass_zeek_plus_ebpf.parquet --out_dir data/datasets/splits_zeek_plus_ebpf_primary --split primary
+python3 ml/data_prep/split_by_day.py --in_parquet data/datasets/cicids2017_multiclass_zeek_plus_ebpf.parquet --out_dir data/datasets/splits_zeek_plus_ebpf_primary --split primary
 ```
 
 ---
@@ -80,14 +79,14 @@ python3 ml/core/split_by_day.py --in_parquet data/datasets/cicids2017_multiclass
 This is the main “baseline suite” runner (dummy + logistic regression, etc.):
 
 ```bash
-python3 ml/supervised/train_eval.py \
+python3 ml/scripts/train_eval.py \
   --splits_dir data/datasets/splits_zeek_only \
   --run_name zeek_only_primary_v2 \
   --out_models_dir data/models \
   --out_reports_dir data/reports \
   --topk_cats 50
 
-python3 ml/supervised/train_eval.py \
+python3 ml/scripts/train_eval.py \
   --splits_dir data/datasets/splits_zeek_plus_ebpf \
   --run_name zeek_plus_ebpf_primary_v2 \
   --out_models_dir data/models \
@@ -96,6 +95,7 @@ python3 ml/supervised/train_eval.py \
 ```
 
 Optional flags (see `--help` for full list):
+
 - `--balanced_logreg` to use `class_weight='balanced'` for LogisticRegression.
 
 ---
@@ -103,13 +103,13 @@ Optional flags (see `--help` for full list):
 ## 2) Train Isolation Forest (unsupervised anomaly detector)
 
 ```bash
-python3 ml/core/train_iforest_complete.py \
+python3 ml/methods/unsupervised_iforest/train_iforest.py \
   --splits_dir data/datasets/splits_zeek_only \
   --run_name iforest_zeek_only \
   --out_models_dir data/models \
   --out_reports_dir data/reports
 
-python3 ml/core/train_iforest_complete.py \
+python3 ml/methods/unsupervised_iforest/train_iforest.py \
   --splits_dir data/datasets/splits_zeek_plus_ebpf \
   --run_name iforest_zeek_plus_ebpf \
   --out_models_dir data/models \
@@ -121,13 +121,13 @@ python3 ml/core/train_iforest_complete.py \
 ## 3) Train Random Forest (supervised classifier)
 
 ```bash
-python3 ml/core/train_random_forest.py \
+python3 ml/methods/supervised_rf/train_random_forest.py \
   --splits_dir data/datasets/splits_zeek_only \
   --run_name rf_zeek_only \
   --out_models_dir data/models \
   --out_reports_dir data/reports
 
-python3 ml/core/train_random_forest.py \
+python3 ml/methods/supervised_rf/train_random_forest.py \
   --splits_dir data/datasets/splits_zeek_plus_ebpf \
   --run_name rf_zeek_plus_ebpf \
   --out_models_dir data/models \
@@ -141,7 +141,7 @@ python3 ml/core/train_random_forest.py \
 If your merged dataset has a `day` column and you want consistent day-based train/val/test splits:
 
 ```bash
-python3 ml/core/split_by_day.py \
+python3 ml/data_prep/split_by_day.py \
   --in_parquet data/datasets/your_merged.parquet \
   --out_dir data/datasets/splits_custom_primary
 ```
@@ -157,7 +157,6 @@ bash ml/RUN_ALL_EXPERIMENTS.sh
 ```
 
 This expects the standard split directories to exist (see the script header for the exact names).
-
 
 ---
 
@@ -175,13 +174,6 @@ Scripts print a small number of lines in the format:
 - `[+]` success
 - `[!]` warning (non-fatal)
 - `[x]` error (fatal)
-
-Each line is timestamped in **UTC**:
-
-```
-[2026-02-16T12:34:56Z] [*] starting
-[2026-02-16T12:35:20Z] [+] saved model: data/models/...
-```
 
 ---
 
@@ -219,19 +211,24 @@ Typical outputs:
 ## Common failure modes
 
 ### 1) “file not found” for splits
+
 Your `--splits_dir` must contain:
+
 - `train.parquet`
 - `val.parquet`
 - `test.parquet`
 
 ### 2) Missing columns
+
 Some scripts expect at least:
+
 - labels: `label_family` (and/or `is_attack`)
 - metadata: `day` (only for day-based splitting)
 
 If your dataset schema differs, check `drop = [...]` lists in the scripts and adjust.
 
 ### 3) Parquet engine errors
+
 If pandas complains about Parquet support, install the recommended engine:
 
 ```bash
@@ -245,3 +242,16 @@ pip install pyarrow
 - Reports directory contains new files with your `--run_name`
 - Confusion matrix PNGs open correctly
 - Classification report shows non-zero support for major classes (not everything collapsed to one class)
+
+## Folder structure (recommended)
+
+- `ml/data_prep/` – build datasets and create splits (including `within_day_time` split to avoid missing attack families)
+- `ml/methods/` – training scripts grouped by methodology
+  - `supervised_rf/`
+  - `unsupervised_iforest/`
+- `ml/analysis/` – feature importance + comparisons
+- `ml/scripts/` – full pipeline runners (wrapper remains at `ml/RUN_ALL_EXPERIMENTS.sh`)
+
+### Why `within_day_time` splits?
+
+CICIDS2017 attack families are concentrated on specific days. Holding out an entire day often means some attack families are **never seen during training**, which makes supervised results look "broken". `within_day_time` keeps every day present across train/val/test while still being time-ordered.

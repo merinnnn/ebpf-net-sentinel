@@ -1,9 +1,11 @@
-numpy
 pandas
+pyarrow
 scikit-learn
-scipy
 joblib
 matplotlib
+shap
+numpy
+scipy
+
 jupyterlab
 ipykernel
-pyarrow

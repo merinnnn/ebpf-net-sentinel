@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """
 Statistical Comparison of Baseline vs eBPF-Enhanced Models
-
-Answers Research Question 1: Does eBPF significantly improve detection?
 """
 import argparse
 import json

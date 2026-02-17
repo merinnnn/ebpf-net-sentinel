@@ -31,7 +31,7 @@ if [ ! -f "$MERGED_PARQUET" ]; then
 fi
 
 echo "[*] Building baseline/enhanced datasets"
-python3 ml/core/make_datasets.py \
+python3 ml/data_prep/make_datasets.py \
   --in_parquet "$MERGED_PARQUET" \
   --out_baseline "$ZEEK_ONLY_PARQUET" \
   --out_enhanced "$ZEEK_EBPF_PARQUET" \
@@ -43,7 +43,7 @@ echo "    enhanced: $ZEEK_EBPF_PARQUET"
 echo ""
 
 echo "[*] Creating primary splits (baseline)"
-python3 ml/core/split_days_auto.py \
+python3 ml/data_prep/split_days_auto.py \
   --in_parquet "$ZEEK_ONLY_PARQUET" \
   --out_dir data/datasets/splits_zeek_only_primary \
   --protocol day_holdout \
@@ -52,7 +52,7 @@ python3 ml/core/split_days_auto.py \
   --min_attacks_test 1000
 
 echo "[*] Creating primary splits (enhanced)"
-python3 ml/core/split_days_auto.py \
+python3 ml/data_prep/split_days_auto.py \
   --in_parquet "$ZEEK_EBPF_PARQUET" \
   --out_dir data/datasets/splits_zeek_plus_ebpf_primary \
   --protocol day_holdout \
@@ -83,7 +83,7 @@ mkdir -p data/models data/reports/feature_importance
 
 # Experiment 1: Isolation Forest - Baseline
 echo "[*] EXPERIMENT 1: Isolation Forest (Baseline)"
-python3 ml/core/train_iforest_complete.py \
+python3 ml/methods/unsupervised_iforest/train_iforest.py \
   --splits_dir data/datasets/splits_zeek_only_primary \
   --run_name baseline_if \
   --out_models_dir data/models \
@@ -97,15 +97,14 @@ echo ""
 
 # Experiment 2: Random Forest - Baseline
 echo "[*] EXPERIMENT 2: Random Forest (Baseline)"
-python3 ml/core/train_random_forest.py \
+python3 ml/methods/supervised_rf/train_random_forest.py \
   --splits_dir data/datasets/splits_zeek_only_primary \
   --run_name baseline_rf \
   --out_models_dir data/models \
   --out_reports_dir data/reports \
-  --n_estimators 400 \
-  --max_depth 24 \
-  --balance_classes \
-  --tune_threshold
+  --n_estimators 200 \
+  --max_depth 20 \
+  --balance_classes
 
 echo ""
 echo "[+] Experiment 2 complete"
@@ -113,7 +112,7 @@ echo ""
 
 # Experiment 3: Isolation Forest - eBPF
 echo "[*] EXPERIMENT 3: Isolation Forest (eBPF)"
-python3 ml/core/train_iforest_complete.py \
+python3 ml/methods/unsupervised_iforest/train_iforest.py \
   --splits_dir data/datasets/splits_zeek_plus_ebpf_primary \
   --run_name ebpf_if \
   --out_models_dir data/models \
@@ -127,15 +126,14 @@ echo ""
 
 # Experiment 4: Random Forest - eBPF
 echo "[*] EXPERIMENT 4: Random Forest (eBPF)"
-python3 ml/core/train_random_forest.py \
+python3 ml/methods/supervised_rf/train_random_forest.py \
   --splits_dir data/datasets/splits_zeek_plus_ebpf_primary \
   --run_name ebpf_rf \
   --out_models_dir data/models \
   --out_reports_dir data/reports \
-  --n_estimators 400 \
-  --max_depth 24 \
-  --balance_classes \
-  --tune_threshold
+  --n_estimators 200 \
+  --max_depth 20 \
+  --balance_classes
 
 echo ""
 echo "[+] Experiment 4 complete"
@@ -145,14 +143,14 @@ echo ""
 echo "[*] Statistical Comparison"
 
 echo "[*] Comparing Isolation Forest..."
-python3 ml/core/statistical_comparison.py \
+python3 ml/analysis/statistical_comparison.py \
   --baseline_summary data/reports/baseline_if_iforest_summary.json \
   --ebpf_summary data/reports/ebpf_if_iforest_summary.json \
   --out_json data/reports/comparison_if.json
 
 echo ""
 echo "[*] Comparing Random Forest..."
-python3 ml/core/statistical_comparison.py \
+python3 ml/analysis/statistical_comparison.py \
   --baseline_summary data/reports/baseline_rf_rf_summary.json \
   --ebpf_summary data/reports/ebpf_rf_rf_summary.json \
   --out_json data/reports/comparison_rf.json
@@ -163,7 +161,7 @@ echo ""
 
 # Feature importance
 echo "[*] Feature Importance Analysis"
-python3 ml/core/analyze_feature_importance.py \
+python3 ml/analysis/analyze_feature_importance.py \
   --model_baseline data/models/baseline_rf_rf.joblib \
   --model_ebpf data/models/ebpf_rf_rf.joblib \
   --test_data_baseline data/datasets/splits_zeek_only_primary/test.parquet \
