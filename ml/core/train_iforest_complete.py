@@ -53,8 +53,12 @@ def make_preprocessor(X_train: pd.DataFrame):
     # For Isolation Forest, we typically use only numeric features
     # Categorical features like IP addresses don't work well
     
-    numeric_cols = [c for c in X_train.columns 
-                    if X_train[c].dtype in ['int64', 'float64', 'int32', 'float32']]
+    numeric_cols = [
+        c
+        for c in X_train.columns
+        if X_train[c].dtype in ["int64", "float64", "int32", "float32"]
+        and not X_train[c].isna().all()
+    ]
     
     # Remove non-feature columns
     exclude = ['ts', 'start_ts', 'end_ts', 't_end', 'run_id']
