@@ -152,8 +152,10 @@ python3 ml/analysis/analyze_feature_importance.py \
   --test_data_baseline data/datasets/splits_zeek_only_primary/test.parquet \
   --test_data_ebpf data/datasets/splits_zeek_plus_ebpf_primary/test.parquet \
   --out_dir data/reports/feature_importance \
-  --n_repeats 10 \
-  --top_k 20
+  --n_repeats 5 \
+  --top_k 20 \
+  --sample_n 50000 \
+  --n_jobs 4
 
 echo ""
 echo "[+] Feature importance complete"
