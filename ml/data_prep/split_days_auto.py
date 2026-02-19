@@ -9,85 +9,171 @@ Protocols:
   - day_holdout: hold out whole days (useful for "generalize to unseen day" evaluation).
     WARNING: If some attack families only exist on a single day, they will be missing from train.
 
+  - stratified_label: ignore days, split by label_col with stratification. Robust to rare classes via min_class_count.
+
 Outputs:
   out_dir/{train,val,test}.parquet and a split_report.json with per-split label counts.
 """
-import argparse, json, os
+import argparse
+import json
 from pathlib import Path
+
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import train_test_split
 
-RNG = np.random.default_rng(42)
 
-def _value_counts(df, col):
-    if col not in df.columns:
-        return {}
-    vc = df[col].fillna("Unknown").value_counts()
-    return {str(k): int(v) for k, v in vc.items()}
+LABEL_COL_CANDIDATES = ["label_family", "label", "attack_type", "Label"]
+DAY_COL_CANDIDATES = ["day", "Day", "capture_day"]
 
-def _attack_counts(df):
-    if "is_attack" not in df.columns:
-        return {"attacks": None, "benign": None, "attack_pct": None}
-    attacks = int((df["is_attack"] == 1).sum())
-    benign  = int((df["is_attack"] == 0).sum())
-    pct = float(attacks / max(1, (attacks + benign)) * 100.0)
-    return {"attacks": attacks, "benign": benign, "attack_pct": pct}
 
-def _report_split(df):
-    rep = {
-        "rows": int(len(df)),
-        **_attack_counts(df),
-        "label_family": _value_counts(df, "label_family"),
-        "day": _value_counts(df, "day"),
-    }
-    return rep
+def find_first_col(df: pd.DataFrame, candidates):
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
 
-def split_within_day_time(df, train_frac, val_frac, test_frac):
-    if abs((train_frac + val_frac + test_frac) - 1.0) > 1e-6:
-        raise ValueError("train/val/test fractions must sum to 1.0")
 
-    if "day" not in df.columns:
-        raise ValueError("missing required column: day")
-
-    # Use ts if present; otherwise fall back to row order within day.
-    has_ts = "ts" in df.columns
-    parts = {"train": [], "val": [], "test": []}
-
-    for day, g in df.groupby("day", sort=False):
-        g2 = g.copy()
-        if has_ts:
-            g2 = g2.sort_values("ts")
-        else:
-            g2 = g2.reset_index(drop=True)
-
-        n = len(g2)
-        n_train = int(n * train_frac)
-        n_val   = int(n * val_frac)
-        # remainder -> test
-        n_test  = n - n_train - n_val
-
-        parts["train"].append(g2.iloc[:n_train])
-        parts["val"].append(g2.iloc[n_train:n_train+n_val])
-        parts["test"].append(g2.iloc[n_train+n_val:])
-
-    out = {k: pd.concat(v, ignore_index=True) if v else df.iloc[0:0].copy() for k, v in parts.items()}
+def _report_split(df: pd.DataFrame, label_col: str | None):
+    out = {"rows": int(len(df))}
+    if label_col and label_col in df.columns:
+        vc = df[label_col].fillna("Unknown").astype(str).value_counts()
+        out[label_col] = {k: int(v) for k, v in vc.items()}
+    if "is_attack" in df.columns:
+        vc2 = df["is_attack"].value_counts(dropna=False)
+        out["is_attack"] = {str(k): int(v) for k, v in vc2.items()}
+    if "day" in df.columns:
+        vc3 = df["day"].astype(str).value_counts()
+        out["day"] = {k: int(v) for k, v in vc3.items()}
     return out
 
-def split_day_holdout(df, day_train, day_val, day_test):
-    parts = {
-        "train": df[df["day"].isin(day_train)].copy(),
-        "val":   df[df["day"].isin(day_val)].copy(),
-        "test":  df[df["day"].isin(day_test)].copy(),
+
+def split_within_day_time(df: pd.DataFrame, train_frac: float, val_frac: float, test_frac: float, seed: int):
+    # Shuffle then split by fraction (no stratification)
+    if not np.isclose(train_frac + val_frac + test_frac, 1.0):
+        raise ValueError("train_frac + val_frac + test_frac must sum to 1.0")
+
+    n = len(df)
+    rng = np.random.default_rng(seed)
+    idx = np.arange(n)
+    rng.shuffle(idx)
+
+    n_train = int(round(train_frac * n))
+    n_val = int(round(val_frac * n))
+    n_test = n - n_train - n_val
+
+    idx_train = idx[:n_train]
+    idx_val = idx[n_train:n_train + n_val]
+    idx_test = idx[n_train + n_val:]
+
+    return {
+        "train": df.iloc[idx_train].reset_index(drop=True),
+        "val": df.iloc[idx_val].reset_index(drop=True),
+        "test": df.iloc[idx_test].reset_index(drop=True),
     }
-    return parts
+
+
+def split_day_holdout(df: pd.DataFrame, day_col: str, train_days, val_days, test_days):
+    df_day = df.copy()
+    df_day[day_col] = df_day[day_col].astype(str)
+
+    train = df_day[df_day[day_col].isin(set(map(str, train_days)))]
+    val = df_day[df_day[day_col].isin(set(map(str, val_days)))]
+    test = df_day[df_day[day_col].isin(set(map(str, test_days)))]
+
+    return {
+        "train": train.reset_index(drop=True),
+        "val": val.reset_index(drop=True),
+        "test": test.reset_index(drop=True),
+    }
+
+
+def split_stratified_label(
+    df: pd.DataFrame,
+    label_col: str,
+    train_frac: float,
+    val_frac: float,
+    test_frac: float,
+    seed: int,
+    min_class_count: int,
+):
+    """
+    Stratified split by label_col.
+    Robust to rare classes:
+      - Any class with count < min_class_count is mapped to "__RARE__"
+      - If "__RARE__" still has < 2 samples, we disable stratification for the 2nd split as needed.
+    """
+    if not np.isclose(train_frac + val_frac + test_frac, 1.0):
+        raise ValueError("train_frac + val_frac + test_frac must sum to 1.0")
+
+    if train_frac <= 0 or val_frac <= 0 or test_frac <= 0:
+        raise ValueError("fractions must be > 0")
+
+    y = df[label_col].fillna("Unknown").astype(str)
+
+    vc = y.value_counts()
+    rare = vc[vc < int(min_class_count)].index
+    y2 = y.where(~y.isin(rare), other="__RARE__")
+
+    # First split: train vs temp (val+test)
+    temp_frac = (1.0 - train_frac)
+    if not (0.0 < temp_frac < 1.0):
+        raise ValueError(f"Invalid temp_frac computed: {temp_frac}")
+
+    # Stratification requires each class >= 2
+    strat1 = y2
+    if strat1.value_counts().min() < 2:
+        # Fall back to unstratified if the dataset is too weird
+        strat1 = None
+
+    idx_all = np.arange(len(df))
+    idx_train, idx_temp = train_test_split(
+        idx_all,
+        test_size=float(temp_frac),
+        random_state=int(seed),
+        stratify=strat1,
+    )
+
+    # Second split: val vs test inside temp
+    y_temp = y2.iloc[idx_temp]
+    val_plus_test = val_frac + test_frac
+    test_frac_of_temp = test_frac / val_plus_test  # proportion of temp that becomes test
+
+    if not (0.0 < test_frac_of_temp < 1.0):
+        raise ValueError(f"Invalid test_frac_of_temp computed: {test_frac_of_temp}")
+
+    strat2 = y_temp
+    if strat2.value_counts().min() < 2:
+        strat2 = None  # avoid sklearn crash on rare leftover classes
+
+    idx_val, idx_test = train_test_split(
+        idx_temp,
+        test_size=float(test_frac_of_temp),
+        random_state=int(seed),
+        stratify=strat2,
+    )
+
+    return {
+        "train": df.iloc[idx_train].reset_index(drop=True),
+        "val": df.iloc[idx_val].reset_index(drop=True),
+        "test": df.iloc[idx_test].reset_index(drop=True),
+        "meta": {
+            "min_class_count": int(min_class_count),
+            "rare_classes_mapped": sorted([str(x) for x in rare]),
+            "label_col": label_col,
+        },
+    }
+
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--in_parquet", required=True)
     ap.add_argument("--out_dir", required=True)
-    ap.add_argument("--protocol", choices=["within_day_time", "day_holdout"], default="within_day_time")
 
-    # within_day_time params
+    ap.add_argument("--protocol", choices=["within_day_time", "day_holdout", "stratified_label"], default="within_day_time")
+    ap.add_argument("--seed", type=int, default=42)
+
+    # fraction params
     ap.add_argument("--train_frac", type=float, default=0.70)
     ap.add_argument("--val_frac", type=float, default=0.15)
     ap.add_argument("--test_frac", type=float, default=0.15)
@@ -97,6 +183,9 @@ def main():
     ap.add_argument("--val_days", default="")
     ap.add_argument("--test_days", default="")
 
+    # stratified_label params
+    ap.add_argument("--min_class_count", type=int, default=10, help="labels with < this count get mapped to __RARE__")
+
     args = ap.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -104,44 +193,73 @@ def main():
 
     df = pd.read_parquet(args.in_parquet)
 
+    label_col = find_first_col(df, LABEL_COL_CANDIDATES)
+    day_col = find_first_col(df, DAY_COL_CANDIDATES)
+
+    meta = {"protocol": args.protocol, "seed": int(args.seed)}
+
     if args.protocol == "within_day_time":
-        splits = split_within_day_time(df, args.train_frac, args.val_frac, args.test_frac)
-        chosen = {"train_days": "ALL", "val_days": "ALL", "test_days": "ALL"}
-    else:
+        splits = split_within_day_time(df, args.train_frac, args.val_frac, args.test_frac, args.seed)
+        chosen = {"mode": "within_day_time"}
+
+    elif args.protocol == "day_holdout":
         if not args.train_days or not args.val_days or not args.test_days:
             raise SystemExit("day_holdout requires --train_days, --val_days, --test_days")
+        if not day_col:
+            raise SystemExit("day_holdout requires a day column (e.g. 'day') but none was found.")
         day_train = [x.strip() for x in args.train_days.split(",") if x.strip()]
-        day_val   = [x.strip() for x in args.val_days.split(",") if x.strip()]
-        day_test  = [x.strip() for x in args.test_days.split(",") if x.strip()]
-        splits = split_day_holdout(df, day_train, day_val, day_test)
+        day_val = [x.strip() for x in args.val_days.split(",") if x.strip()]
+        day_test = [x.strip() for x in args.test_days.split(",") if x.strip()]
+        splits = split_day_holdout(df, day_col, day_train, day_val, day_test)
         chosen = {"train_days": day_train, "val_days": day_val, "test_days": day_test}
 
-    # Save
+    else:  # stratified_label
+        if not label_col:
+            raise SystemExit("stratified_label requires a label column, but none was found.")
+        out = split_stratified_label(
+            df=df,
+            label_col=label_col,
+            train_frac=args.train_frac,
+            val_frac=args.val_frac,
+            test_frac=args.test_frac,
+            seed=args.seed,
+            min_class_count=args.min_class_count,
+        )
+        splits = {k: out[k] for k in ["train", "val", "test"]}
+        meta.update(out["meta"])
+        chosen = {"mode": "stratified_label", "label_col": label_col}
+
+    # save splits
     for k in ["train", "val", "test"]:
-        p = out_dir / f"{k}.parquet"
-        splits[k].to_parquet(p, index=False)
+        splits[k].to_parquet(out_dir / f"{k}.parquet", index=False)
 
     report = {
-        "protocol": args.protocol,
+        **meta,
         "chosen": chosen,
-        "splits": {k: _report_split(splits[k]) for k in ["train", "val", "test"]},
+        "splits": {k: _report_split(splits[k], label_col) for k in ["train", "val", "test"]},
     }
 
-    # Extra diagnostics: which label families are exclusive to a split?
-    fam_sets = {k: set(pd.Series(list(report["splits"][k]["label_family"].keys())).astype(str)) for k in ["train","val","test"]}
-    report["diagnostics"] = {
-        "families_only_in_train": sorted(list(fam_sets["train"] - fam_sets["val"] - fam_sets["test"])),
-        "families_only_in_val":   sorted(list(fam_sets["val"] - fam_sets["train"] - fam_sets["test"])),
-        "families_only_in_test":  sorted(list(fam_sets["test"] - fam_sets["train"] - fam_sets["val"])),
-    }
+    # label coverage diagnostics (set membership)
+    if label_col and label_col in df.columns:
+        fam_sets = {
+            k: set(pd.Series(list(report["splits"][k].get(label_col, {}).keys())).astype(str))
+            for k in ["train", "val", "test"]
+        }
+        report["diagnostics"] = {
+            "labels_only_in_train": sorted(list(fam_sets["train"] - fam_sets["val"] - fam_sets["test"])),
+            "labels_only_in_val": sorted(list(fam_sets["val"] - fam_sets["train"] - fam_sets["test"])),
+            "labels_only_in_test": sorted(list(fam_sets["test"] - fam_sets["train"] - fam_sets["val"])),
+            "labels_in_all": sorted(list(fam_sets["train"] & fam_sets["val"] & fam_sets["test"])),
+        }
 
-    rp = out_dir / "split_report.json"
-    rp.write_text(json.dumps(report, indent=2))
+    with open(out_dir / "split_report.json", "w") as f:
+        json.dump(report, f, indent=2)
 
     print(f"[*] Wrote splits to: {out_dir}")
-    for k in ["train","val","test"]:
-        print(f"  {k}: {out_dir / (k+'.parquet')}")
-    print(f"[*] split report: {rp}")
+    for k in ["train", "val", "test"]:
+        print(f"  {k}: {out_dir / f'{k}.parquet'}")
+    print(f"[*] split report: {out_dir / 'split_report.json'}")
+
 
 if __name__ == "__main__":
     main()
