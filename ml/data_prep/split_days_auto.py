@@ -49,28 +49,47 @@ def _report_split(df: pd.DataFrame, label_col: str | None):
 
 
 def split_within_day_time(df: pd.DataFrame, train_frac: float, val_frac: float, test_frac: float, seed: int):
-    # Shuffle then split by fraction (no stratification)
+    """Split within each day by **time order**.
+
+    If a day column exists, we do the split per-day then concatenate.
+    Within each day, we sort by timestamp if available (ts/start_ts), otherwise we shuffle.
+    """
     if not np.isclose(train_frac + val_frac + test_frac, 1.0):
         raise ValueError("train_frac + val_frac + test_frac must sum to 1.0")
 
-    n = len(df)
-    rng = np.random.default_rng(seed)
-    idx = np.arange(n)
-    rng.shuffle(idx)
+    day_col = find_first_col(df, DAY_COL_CANDIDATES)
+    ts_col = None
+    for c in ["ts", "start_ts", "t_start", "time", "timestamp"]:
+        if c in df.columns:
+            ts_col = c
+            break
 
-    n_train = int(round(train_frac * n))
-    n_val = int(round(val_frac * n))
-    n_test = n - n_train - n_val
+    def _split_one(part: pd.DataFrame):
+        n = len(part)
+        if n == 0:
+            return {"train": part, "val": part, "test": part}
+        if ts_col:
+            part2 = part.sort_values(ts_col, kind="mergesort")
+        else:
+            part2 = part.sample(frac=1.0, random_state=seed)
+        n_train = int(round(train_frac * n))
+        n_val = int(round(val_frac * n))
+        n_test = n - n_train - n_val
+        train = part2.iloc[:n_train]
+        val = part2.iloc[n_train:n_train + n_val]
+        test = part2.iloc[n_train + n_val:]
+        return {"train": train, "val": val, "test": test}
 
-    idx_train = idx[:n_train]
-    idx_val = idx[n_train:n_train + n_val]
-    idx_test = idx[n_train + n_val:]
-
-    return {
-        "train": df.iloc[idx_train].reset_index(drop=True),
-        "val": df.iloc[idx_val].reset_index(drop=True),
-        "test": df.iloc[idx_test].reset_index(drop=True),
-    }
+    if day_col:
+        parts = {"train": [], "val": [], "test": []}
+        for d, g in df.groupby(day_col, sort=False):
+            out = _split_one(g)
+            for k in parts:
+                parts[k].append(out[k])
+        return {k: pd.concat(parts[k], ignore_index=True) for k in parts}
+    else:
+        out = _split_one(df)
+        return {k: out[k].reset_index(drop=True) for k in out}
 
 
 def split_day_holdout(df: pd.DataFrame, day_col: str, train_days, val_days, test_days):
