@@ -86,10 +86,44 @@ def split_within_day_time(df: pd.DataFrame, train_frac: float, val_frac: float, 
             out = _split_one(g)
             for k in parts:
                 parts[k].append(out[k])
-        return {k: pd.concat(parts[k], ignore_index=True) for k in parts}
+        result = {k: pd.concat(parts[k], ignore_index=True) for k in parts}
     else:
         out = _split_one(df)
-        return {k: out[k].reset_index(drop=True) for k in out}
+        result = {k: out[k].reset_index(drop=True) for k in out}
+
+    # Label-coverage safety check
+    label_col = find_first_col(df, LABEL_COL_CANDIDATES)
+    if label_col and label_col in result["train"].columns:
+        train_labels = set(result["train"][label_col].astype(str).unique())
+
+        for src_split in ["val", "test"]:
+            src_df = result[src_split].copy().reset_index(drop=True)
+            split_labels = set(src_df[label_col].astype(str).unique())
+            orphaned = split_labels - train_labels - {"BENIGN", "Unknown", "nan"}
+
+            if not orphaned:
+                continue
+
+            print(f"[!] within_day_time: attack families with 0 train rows (found in {src_split}): {sorted(orphaned)}")
+            print(f"    Relocating minimum flows to train for label coverage...")
+
+            move_indices = []
+            for lbl in sorted(orphaned):
+                lbl_mask = src_df[label_col].astype(str) == lbl
+                lbl_idx  = src_df.index[lbl_mask].tolist()
+                # Move all but the last row; keep ≥1 in the original split for evaluation
+                to_move = lbl_idx[:-1] if len(lbl_idx) > 1 else lbl_idx
+                move_indices.extend(to_move)
+                kept = len(lbl_idx) - len(to_move)
+                print(f"    '{lbl}': {len(lbl_idx)} rows -> moving {len(to_move)} to train, keeping {kept} in {src_split}")
+
+            if move_indices:
+                moved_df = src_df.loc[move_indices]
+                result["train"] = pd.concat([result["train"], moved_df], ignore_index=True)
+                result[src_split] = src_df.drop(index=move_indices).reset_index(drop=True)
+                train_labels = set(result["train"][label_col].astype(str).unique())
+
+    return result
 
 
 def split_day_holdout(df: pd.DataFrame, day_col: str, train_days, val_days, test_days):
