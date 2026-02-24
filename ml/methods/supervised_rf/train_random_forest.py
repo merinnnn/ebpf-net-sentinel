@@ -53,6 +53,7 @@ def main():
     p.add_argument("--out_reports_dir", default="data/reports")
     p.add_argument("--n_estimators", type=int, default=200)
     p.add_argument("--max_depth", type=int, default=20)
+    p.add_argument("--n_jobs", type=int, default=1)
     p.add_argument("--balance_classes", action="store_true", default=True)
     args = p.parse_args()
     os.makedirs(args.out_models_dir, exist_ok=True)
@@ -80,7 +81,14 @@ def main():
     
     print(f"\n[*] Training Random Forest (n={args.n_estimators}, depth={args.max_depth})...")
     t0 = time.time()
-    rf = RandomForestClassifier(n_estimators=args.n_estimators, max_depth=args.max_depth, class_weight='balanced' if args.balance_classes else None, random_state=42, n_jobs=-1, verbose=0)
+    rf = RandomForestClassifier(
+        n_estimators=args.n_estimators,
+        max_depth=args.max_depth,
+        class_weight='balanced' if args.balance_classes else None,
+        random_state=42,
+        n_jobs=args.n_jobs,
+        verbose=0,
+    )
     rf.fit(X_train_s, y_train)
     train_time = time.time() - t0
     print(f"[*] Training completed in {train_time:.1f}s")
@@ -114,7 +122,7 @@ def main():
     model_path = f"{args.out_models_dir}/{args.run_name}_rf.joblib"
     joblib.dump({'model':rf, 'scaler':scaler, 'features':X_train.columns.tolist()}, model_path)
     
-    results = {'timestamp':datetime.utcnow().isoformat()+"Z", 'run_name':args.run_name, 'model':'RandomForest', 'params':{'n_estimators':args.n_estimators,'max_depth':args.max_depth,'class_weight':'balanced' if args.balance_classes else None}, 'training_time_seconds':float(train_time), 'features':X_train.columns.tolist(), 'validation':val_m, 'test':test_m, 'per_attack_detection':pa, 'feature_importance':fi.head(20).to_dict('records'), 'model_path':model_path, 'confusion_png':cm_png}
+    results = {'timestamp':datetime.utcnow().isoformat()+"Z", 'run_name':args.run_name, 'model':'RandomForest', 'params':{'n_estimators':args.n_estimators,'max_depth':args.max_depth,'n_jobs':args.n_jobs,'class_weight':'balanced' if args.balance_classes else None}, 'training_time_seconds':float(train_time), 'features':X_train.columns.tolist(), 'validation':val_m, 'test':test_m, 'per_attack_detection':pa, 'feature_importance':fi.head(20).to_dict('records'), 'model_path':model_path, 'confusion_png':cm_png}
     
     summary_path = f"{args.out_reports_dir}/{args.run_name}_rf_summary.json"
     with open(summary_path, "w") as f: json.dump(results, f, indent=2)
@@ -123,5 +131,5 @@ def main():
     print(f"Summary: {summary_path}")
     print(f"Confusion: {cm_png}")
 
-if __name__ == "__main__": main()
-from pathlib import Path
+if __name__ == "__main__":
+    main()
