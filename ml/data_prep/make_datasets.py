@@ -92,6 +92,34 @@ def select_feature_columns(columns: List[str]) -> Tuple[List[str], List[str], Li
     enhanced = baseline + ebpf_cols
     return baseline, enhanced, ebpf_cols
 
+def _encode_categorical_ebpf(df: pd.DataFrame, ebpf_cols: list,
+                              freq_maps: dict | None = None,
+                              fit: bool = False) -> tuple:
+    """
+    Encode string/categorical eBPF columns (e.g. comm/exe) using frequency
+    encoding (count of each category in the training set, normalised to [0,1]).
+
+    This preserves process-context signal without exploding dimensionality.
+    """
+    cat_cols = [c for c in ebpf_cols if c in df.columns
+                and not pd.api.types.is_numeric_dtype(df[c])]
+    if not cat_cols:
+        return df, freq_maps or {}
+
+    if fit:
+        freq_maps = {}
+        for c in cat_cols:
+            vc = df[c].astype(str).value_counts(normalize=True)
+            freq_maps[c] = vc.to_dict()
+
+    df = df.copy()
+    for c in cat_cols:
+        fmap = (freq_maps or {}).get(c, {})
+        df[c] = df[c].astype(str).map(fmap).fillna(0.0).astype(float)
+
+    return df, freq_maps or {}
+
+
 def _iter_batches(parquet_path: str, batch_size: int, columns=None):
     pf = pq.ParquetFile(parquet_path)
     for batch in pf.iter_batches(batch_size=batch_size, columns=columns):
@@ -141,6 +169,7 @@ def build_datasets(
 
     label_counts = {}
     day_counts = {}
+    freq_maps_ebpf = None
 
     for df in _iter_batches(in_parquet, batch_size, columns=list(set(base_out_cols + enh_out_cols))):
         if drop_unknown:
@@ -160,19 +189,30 @@ def build_datasets(
             for d, v in dvc.items():
                 day_counts[str(d)] = day_counts.get(str(d), 0) + int(v)
 
-        # write baseline
+        # Encode categorical eBPF features (e.g. comm, exe)
+        # First batch: fit freq_maps; subsequent batches: transform only.
+        enh_df_raw = df[enh_out_cols].copy()
+        if freq_maps_ebpf is None:
+            enh_df_enc, freq_maps_ebpf = _encode_categorical_ebpf(
+                enh_df_raw, ebpf_cols, fit=True
+            )
+        else:
+            enh_df_enc, _ = _encode_categorical_ebpf(
+                enh_df_raw, ebpf_cols, freq_maps=freq_maps_ebpf, fit=False
+            )
+
+        # write baseline (no eBPF cols, no encoding needed)
         base_df = df[base_out_cols]
         if base_writer is None:
             base_schema = pa.Table.from_pandas(base_df.head(1), preserve_index=False).schema
             base_writer = pq.ParquetWriter(out_baseline, schema=base_schema, compression="snappy")
         base_writer.write_table(pa.Table.from_pandas(base_df, preserve_index=False))
 
-        # write enhanced
-        enh_df = df[enh_out_cols]
+        # write enhanced (baseline + eBPF cols, with encoding)
         if enh_writer is None:
-            enh_schema = pa.Table.from_pandas(enh_df.head(1), preserve_index=False).schema
+            enh_schema = pa.Table.from_pandas(enh_df_enc.head(1), preserve_index=False).schema
             enh_writer = pq.ParquetWriter(out_enhanced, schema=enh_schema, compression="snappy")
-        enh_writer.write_table(pa.Table.from_pandas(enh_df, preserve_index=False))
+        enh_writer.write_table(pa.Table.from_pandas(enh_df_enc, preserve_index=False))
 
     if base_writer:
         base_writer.close()
@@ -190,6 +230,11 @@ def build_datasets(
         "enhanced_num_features": len(enhanced_cols),
         "num_ebpf_features_added": len(ebpf_cols),
         "example_ebpf_cols": ebpf_cols[:25],
+        "categorical_ebpf_encoded": {
+            "method": "frequency_encoding (normalised count from full dataset)",
+            "note": "Categorical eBPF columns (comm, exe, etc.) converted to float [0,1] freq codes so they survive numeric-only model pipelines.",
+            "columns_encoded": list(freq_maps_ebpf.keys()) if freq_maps_ebpf else [],
+        },
         "baseline_columns": base_out_cols,
         "enhanced_columns": enh_out_cols,
         "label_counts_after": label_counts,
