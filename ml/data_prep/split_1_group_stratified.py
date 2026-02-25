@@ -18,6 +18,15 @@ Implementation
 Two-pass streaming:
 1) Build group table (dominant label + group size) using small in-RAM dicts
 2) Stream rows again and write to Parquet incrementally using group->split mapping
+
+KNOWN LIMITATION
+This split stratifies by *number of groups*, not by row volume per group. 
+If a small number of host-pairs generate the bulk of attack traffic, train gets most 
+attacks while val/test may end up with near-zero attack rows.
+
+Use this split for LEAKAGE DIAGNOSTICS only (research question: "am I memorising host pairs?").
+Use Split 2 for balanced model selection and Split 4 for realistic evaluation.
+
 """
 
 import argparse
@@ -248,6 +257,7 @@ def run_streaming(
             "Groups are (orig_h, resp_h). All rows in a group go to the same split.",
             "Dominant label: any-attack-wins; otherwise BENIGN.",
             "Best-effort stratification: ultra-rare dominant labels are collapsed for stratify; if still impossible we fall back to non-stratified splits.",
+            "LIMITATION: stratification is by group count, not row volume. Val/test may have very few attack rows if attack traffic is concentrated in few large groups. USE FOR LEAKAGE DIAGNOSTICS ONLY, not for headline metrics.",
         ],
     }
     (out / "split_report.json").write_text(json.dumps(meta, indent=2))
