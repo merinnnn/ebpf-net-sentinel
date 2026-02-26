@@ -7,6 +7,12 @@ ebpf_core/bpf/vmlinux.h
 ebpf_core/netmon.bpf.o
 ebpf_core/netmon
 
+# Commit small metadata that lets reviewers verify what was run
+!data/reports/
+!data/reports/make_datasets/
+!data/reports/make_datasets/dataset_build_report.json
+!data/reports/make_datasets/baseline_features.txt
+!data/reports/make_datasets/enhanced_features.txt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
