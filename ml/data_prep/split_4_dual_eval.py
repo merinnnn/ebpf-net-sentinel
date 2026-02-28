@@ -41,6 +41,7 @@ def run(
     benign_ratio: float = 1.0,
     seed: int = 42,
     batch_size: int = 131072,
+    min_effective_quota: int = 1,
 ):
     """
     Entry point used by notebooks (in-process).
@@ -69,6 +70,7 @@ def run(
             benign_ratio=benign_ratio,
             seed=seed,
             batch_size=batch_size,
+            min_effective_quota=min_effective_quota,
         )
     finally:
         if _cleanup:
@@ -151,6 +153,7 @@ def write_split(
     benign_ratio: float = 1.0,
     seed: int = 42,
     batch_size: int = 131072,
+    min_effective_quota: int = 1,
 ) -> dict:
     """
     Helper used by notebooks: runs the full streaming split, writes all four
@@ -173,6 +176,7 @@ def write_split(
         "--benign_ratio",  str(benign_ratio),
         "--seed",          str(seed),
         "--batch_size",    str(batch_size),
+        "--min_effective_quota", str(min_effective_quota),
     ]
     try:
         main()
@@ -202,6 +206,8 @@ def main():
     ap.add_argument("--benign_ratio", type=float, default=1.0)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--batch_size", type=int, default=131072)
+    ap.add_argument("--min_effective_quota", type=int, default=50,
+                    help="Fail if effective quota drops below this (prevents tiny balanced tests)")
     a = ap.parse_args()
 
     out = Path(a.out_dir)
@@ -216,6 +222,12 @@ def main():
         raise SystemExit("No attack families found (label_family).")
 
     eff_q = min(a.quota, min(fam_counts.values()))
+
+    if eff_q < a.min_effective_quota:
+        raise SystemExit(
+            f"Effective quota is {eff_q}, below --min_effective_quota={a.min_effective_quota}. "
+            "This would create a tiny test_balanced set; regenerate with a larger quota or check labels."
+        )
     target_benign = min(int(a.benign_ratio * (eff_q * len(fams))), benign_count)
 
     print(f"  Balanced test quota : {a.quota:,} -> effective: {eff_q:,} "
