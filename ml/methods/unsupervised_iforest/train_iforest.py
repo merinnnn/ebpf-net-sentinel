@@ -21,6 +21,18 @@ from sklearn.metrics import (
     roc_auc_score,
     confusion_matrix,
     classification_report,
+    roc_curve,
+)
+
+from ml.methods.logging_utils import (
+    print_artifacts,
+    print_feature_summary,
+    print_metrics_block,
+    print_per_attack_block,
+    print_preprocessing_summary,
+    print_run_header,
+    print_split_summary,
+    print_tuning_summary,
 )
 LABEL_COL = "label_family"
 IS_ATTACK_COL = "is_attack"
@@ -84,7 +96,7 @@ def make_preprocessor(X_train: pd.DataFrame):
         remainder="drop",
     )
     
-    return pre, numeric_cols
+    return pre, numeric_cols, dropped
 
 def plot_confusion(cm: np.ndarray, labels: list, out_png: str):
     """Plot confusion matrix"""
@@ -153,103 +165,179 @@ def per_attack_metrics(y_labels: pd.Series, y_true: np.ndarray,
     
     return results
 
+def tune_contamination_on_val(pre, X_train_benign, X_val, y_val,
+                               n_estimators, max_samples,
+                               candidates=None):
+    """
+    Grid-search contamination on the validation set (maximise F1).
+    Falls back to 'auto' if val has <10 positives.
+    """
+    if candidates is None:
+        candidates = [0.001, 0.005, 0.01, 0.02, 0.05, 0.10, 0.15, 0.20]
+
+    n_pos = int((y_val == 1).sum())
+    if n_pos < 10:
+        print(f"  [!] Only {n_pos} attack samples in val — skipping contamination tuning, using 'auto'.")
+        return "auto"
+
+    best_c, best_f1 = "auto", -1.0
+    print("  Tuning contamination on val F1:")
+    for c in candidates:
+        clf_try = IsolationForest(
+            n_estimators=n_estimators,
+            max_samples=max_samples,
+            contamination=c,
+            random_state=RANDOM_SEED,
+            n_jobs=-1,
+        )
+        pipe_try = Pipeline(steps=[("pre", pre), ("clf", clf_try)])
+        pipe_try.fit(X_train_benign)
+        yhat = (pipe_try.predict(X_val) == -1).astype(int)
+        f1 = f1_score(y_val, yhat, zero_division=0)
+        print(f"    contamination={c:.3f}  val_f1={f1:.4f}")
+        if f1 > best_f1:
+            best_f1, best_c = f1, c
+
+    print(f"  Best contamination: {best_c} (val_f1={best_f1:.4f})")
+    return best_c
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--splits_dir", required=True)
     ap.add_argument("--run_name", required=True)
     ap.add_argument("--out_models_dir", default="data/models")
     ap.add_argument("--out_reports_dir", default="data/reports")
-    ap.add_argument("--contamination", type=float, default=0.1,
-                   help="Expected proportion of outliers (attacks) in training data")
+    ap.add_argument("--contamination", type=float, default=None,
+                   help="Contamination for IsolationForest boundary. "
+                        "If omitted, auto-tuned on val F1.")
     ap.add_argument("--n_estimators", type=int, default=100)
-    ap.add_argument("--max_samples", type=int, default=256)
+    ap.add_argument("--max_samples", type=int, default=512,
+                   help="Sub-sample size per tree. Default 512 (was 256).")
     args = ap.parse_args()
-    
+
     os.makedirs(args.out_models_dir, exist_ok=True)
     os.makedirs(args.out_reports_dir, exist_ok=True)
-    
+
+    print_run_header(
+        model_name="Isolation Forest",
+        run_name=args.run_name,
+        splits_dir=args.splits_dir,
+        out_models_dir=args.out_models_dir,
+        out_reports_dir=args.out_reports_dir,
+        params={
+            "n_estimators": args.n_estimators,
+            "max_samples": args.max_samples,
+            "contamination": args.contamination if args.contamination is not None else "auto",
+            "random_state": RANDOM_SEED,
+        },
+    )
+
     # Load data
     train_df = pd.read_parquet(os.path.join(args.splits_dir, "train.parquet"))
-    val_df = pd.read_parquet(os.path.join(args.splits_dir, "val.parquet"))
-    test_df = pd.read_parquet(os.path.join(args.splits_dir, "test.parquet"))
-    
+    val_df   = pd.read_parquet(os.path.join(args.splits_dir, "val.parquet"))
+    test_df  = pd.read_parquet(os.path.join(args.splits_dir, "test.parquet"))
+
     # Split features and labels
     X_train, y_train, labels_train, day_train = split_xy_binary(train_df)
-    X_val, y_val, labels_val, day_val = split_xy_binary(val_df)
-    X_test, y_test, labels_test, day_test = split_xy_binary(test_df)
-    
-    print(f"[*] Training set: {len(X_train)} samples")
-    print(f"  BENIGN: {(y_train == 0).sum()} ({(y_train == 0).mean()*100:.1f}%)")
-    print(f"  ATTACK: {(y_train == 1).sum()} ({(y_train == 1).mean()*100:.1f}%)")
-    
-    print(f"[*] Validation set: {len(X_val)} samples")
-    print(f"  BENIGN: {(y_val == 0).sum()} ({(y_val == 0).mean()*100:.1f}%)")
-    print(f"  ATTACK: {(y_val == 1).sum()} ({(y_val == 1).mean()*100:.1f}%)")
-    
-    print(f"[*] Test set: {len(X_test)} samples")
-    print(f"  BENIGN: {(y_test == 0).sum()} ({(y_test == 0).mean()*100:.1f}%)")
-    print(f"  ATTACK: {(y_test == 1).sum()} ({(y_test == 1).mean()*100:.1f}%)")
-    
-    # Build preprocessor
-    pre, numeric_cols = make_preprocessor(X_train)
-    
-    print(f"\nUsing {len(numeric_cols)} numeric features:")
-    print(f"  {', '.join(numeric_cols[:10])}...")
-    
-    # Train Isolation Forest on BENIGN data only (unsupervised)
+    X_val,   y_val,   labels_val,   day_val   = split_xy_binary(val_df)
+    X_test,  y_test,  labels_test,  day_test  = split_xy_binary(test_df)
+
+    print("[*] Split sizes")
+    print_split_summary("train", len(X_train), int((y_train == 1).sum()))
+    print_split_summary("val", len(X_val), int((y_val == 1).sum()))
+    print_split_summary("test", len(X_test), int((y_test == 1).sum()))
+
     X_train_benign = X_train[y_train == 0]
-    print(f"\nTraining on BENIGN samples only: {len(X_train_benign)}")
-    
+    pre, numeric_cols, dropped = make_preprocessor(X_train_benign)
+
+    print_preprocessing_summary(
+        "numeric-only ColumnTransformer with median imputation + StandardScaler, fit on benign train rows only"
+    )
+    print_feature_summary(numeric_cols, dropped=dropped)
+    print(f"  benign_train_rows : {len(X_train_benign):,}")
+
+    # Contamination: tune on val if not supplied
+    if args.contamination is not None:
+        chosen_contamination = args.contamination
+        tuning_lines = [
+            "strategy         : user-supplied contamination",
+            f"contamination    : {chosen_contamination}",
+        ]
+    else:
+        print("[*] Contamination search")
+        chosen_contamination = tune_contamination_on_val(
+            pre, X_train_benign, X_val, y_val.to_numpy(),
+            args.n_estimators, args.max_samples,
+        )
+        tuning_lines = [
+            "strategy         : maximize validation F1",
+            f"contamination    : {chosen_contamination}",
+            f"val_attack_rows  : {int((y_val == 1).sum()):,}",
+        ]
+    print_tuning_summary("Contamination selection", tuning_lines)
+
     model = IsolationForest(
         n_estimators=args.n_estimators,
         max_samples=args.max_samples,
-        contamination=args.contamination,
+        contamination=chosen_contamination,
         random_state=RANDOM_SEED,
         n_jobs=-1,
     )
-    
+
     pipe = Pipeline(steps=[
         ("pre", pre),
         ("clf", model),
     ])
-    
-    print("\n[*] Training Isolation Forest...")
+
+    print("[*] Training")
     pipe.fit(X_train_benign)
-    
-    # Predict (IF returns -1 for outliers/attacks, 1 for inliers/benign)
-    # Convert to 0/1 (0=benign, 1=attack)
-    def predict_binary(X):
-        pred = pipe.predict(X)
-        return (pred == -1).astype(int)
-    
+
+    # Anomaly score: higher = more anomalous
     def get_scores(X):
-        """Get anomaly scores (more negative = more anomalous)"""
         return -pipe.decision_function(X)
-    
-    y_train_pred = predict_binary(X_train)
-    y_val_pred = predict_binary(X_val)
-    y_test_pred = predict_binary(X_test)
-    
-    scores_val = get_scores(X_val)
-    scores_test = get_scores(X_test)
+
+    scores_train = get_scores(X_train)
+    scores_val   = get_scores(X_val)
+    scores_test  = get_scores(X_test)
+
+    # Threshold tuning on validation (maximise F1)
+    n_pos_val = int((y_val == 1).sum())
+    if n_pos_val >= 10:
+        from sklearn.metrics import roc_curve
+        _, _, thresholds = roc_curve(y_val.to_numpy(), scores_val)
+        f1s = [f1_score(y_val.to_numpy(), (scores_val >= thr).astype(int), zero_division=0)
+               for thr in thresholds]
+        best_thr = float(thresholds[int(np.argmax(f1s))])
+        threshold_lines = [
+            "strategy         : maximize validation F1",
+            f"threshold        : {best_thr:.5f}",
+            f"best_val_f1      : {max(f1s):.4f}",
+        ]
+    else:
+        best_thr = float(np.percentile(scores_train, 90))   # flag top-10% as anomalies
+        threshold_lines = [
+            "strategy         : fallback train-score percentile",
+            "percentile       : 90",
+            f"threshold        : {best_thr:.5f}",
+        ]
+    print_tuning_summary("Decision-threshold selection", threshold_lines)
+
+    y_train_pred = (scores_train >= best_thr).astype(int)
+    y_val_pred   = (scores_val   >= best_thr).astype(int)
+    y_test_pred  = (scores_test  >= best_thr).astype(int)
     
     # Evaluate
-    print("\n[*] VALIDATION METRICS:")
+    train_metrics = evaluate_binary(y_train.to_numpy(), y_train_pred, scores_train)
     val_metrics = evaluate_binary(y_val.to_numpy(), y_val_pred, scores_val)
-    for k, v in val_metrics.items():
-        print(f"  {k}: {v:.4f}" if v is not None else f"  {k}: N/A")
-    
-    print("\n[*] TEST METRICS:")
     test_metrics = evaluate_binary(y_test.to_numpy(), y_test_pred, scores_test)
-    for k, v in test_metrics.items():
-        print(f"  {k}: {v:.4f}" if v is not None else f"  {k}: N/A")
+    print_metrics_block("Train metrics", train_metrics)
+    print_metrics_block("Validation metrics", val_metrics)
+    print_metrics_block("Test metrics", test_metrics)
     
     # Per-attack-type detection
-    print("\n[*] PER-ATTACK DETECTION (TEST):")
     per_attack = per_attack_metrics(labels_test, y_test.to_numpy(), y_test_pred)
-    for attack, stats in sorted(per_attack.items()):
-        print(f"  {attack:15s}: {stats['detected']:4d}/{stats['count']:4d} "
-              f"({stats['detection_rate']*100:5.1f}%)")
+    print_per_attack_block("Per-attack detection (test)", per_attack)
     
     # Confusion matrix
     cm = confusion_matrix(y_test, y_test_pred, labels=[0, 1])
@@ -270,7 +358,8 @@ def main():
         "model_params": {
             "n_estimators": args.n_estimators,
             "max_samples": args.max_samples,
-            "contamination": args.contamination,
+            "contamination": chosen_contamination,
+            "tuned_threshold": best_thr,
             "random_state": RANDOM_SEED,
         },
         "features": {
@@ -281,6 +370,7 @@ def main():
             "train_on_benign_only": True,
             "num_benign_samples": int((y_train == 0).sum()),
         },
+        "train": train_metrics,
         "validation": val_metrics,
         "test": test_metrics,
         "per_attack_detection": per_attack,
@@ -292,10 +382,12 @@ def main():
                                 f"{args.run_name}_iforest_summary.json")
     with open(summary_path, "w") as f:
         json.dump(results, f, indent=2)
-    
-    print(f"\n[*] Saved model: {model_path}")
-    print(f"[*] Saved confusion: {cm_png}")
-    print(f"[*] Saved summary: {summary_path}")
+
+    print_artifacts(
+        model_path=model_path,
+        summary_path=summary_path,
+        extras={"confpng": cm_png},
+    )
 
 
 if __name__ == "__main__":
