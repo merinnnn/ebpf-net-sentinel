@@ -2,12 +2,12 @@
 """
 Single source of truth for all experiment notebooks.
 
-Split index
-1  split1_group_strat_*      PRIMARY       RQ1-RQ5, all main experiments
-2  split2_balanced_quota_*   COMPARISON    headline confusion matrices / macro-F1
-3  split3_train_resampled_*  IMPROVED      better rare-class learning, same test as Split 1
-4  split4_dual_eval_*        NARRATIVE     balanced + realistic dual evaluation
-5  split5_kfold_groups_*            ROBUSTNESS    mean+/-std over 15 folds
+Current split roles
+1  split1_group_strat_*      DIAGNOSTIC    leakage-safe host-pair stress test
+2  split2_balanced_quota_*   TRAINING      model selection / threshold tuning
+3  split3_train_resampled_*  ABLATION      rare-class learning variant, same test style as Split 1
+4  split4_dual_eval_*        HEADLINE      balanced + realistic final evaluation
+5  split5_kfold_*            ROBUSTNESS    mean +/- std over repeated grouped folds
 """
 from pathlib import Path
 import os
@@ -41,17 +41,11 @@ MERGED_PARQUET = DATASETS_DIR / "cicids2017_multiclass_zeek_ebpf.parquet"
 ZEEK_ONLY_PARQUET = DATASETS_DIR / "cicids2017_multiclass_zeek_only.parquet"
 ZEEK_EBPF_PARQUET = DATASETS_DIR / "cicids2017_multiclass_zeek_plus_ebpf.parquet"
 
-# Split 1: group-stratified (PRIMARY)
+# Split 1: group-stratified leakage diagnostic
 SPLITS_1_BASELINE = DATASETS_DIR / f"split1_group_strat_baseline_seed{RANDOM_SEED}"
 SPLITS_1_EBPF     = DATASETS_DIR / f"split1_group_strat_ebpf_seed{RANDOM_SEED}"
 
-# Canonical alias used by all experiment notebooks
-PRIMARY_SPLITS_BASELINE = SPLITS_1_BASELINE
-PRIMARY_SPLITS_EBPF     = SPLITS_1_EBPF
-PRIMARY_SPLIT_TAG       = f"split1_group_strat_seed{RANDOM_SEED}"
-SPLIT_TAG               = PRIMARY_SPLIT_TAG   # backward compat
-
-# Split 2: balanced quota (headline comparison)
+# Split 2: balanced quota model-selection split
 SPLITS_2_BASELINE = DATASETS_DIR / f"split2_balanced_quota_baseline_seed{RANDOM_SEED}"
 SPLITS_2_EBPF     = DATASETS_DIR / f"split2_balanced_quota_ebpf_seed{RANDOM_SEED}"
 
@@ -59,7 +53,7 @@ SPLITS_2_EBPF     = DATASETS_DIR / f"split2_balanced_quota_ebpf_seed{RANDOM_SEED
 SPLITS_3_BASELINE = DATASETS_DIR / f"split3_train_resampled_baseline_seed{RANDOM_SEED}"
 SPLITS_3_EBPF     = DATASETS_DIR / f"split3_train_resampled_ebpf_seed{RANDOM_SEED}"
 
-# Split 4: dual-eval (balanced + realistic)
+# Split 4: dual-eval (balanced + realistic headline evaluation)
 SPLITS_4_BASELINE = DATASETS_DIR / f"split4_dual_eval_baseline_seed{RANDOM_SEED}"
 SPLITS_4_EBPF     = DATASETS_DIR / f"split4_dual_eval_ebpf_seed{RANDOM_SEED}"
 
@@ -75,6 +69,13 @@ MODEL_SELECTION_SPLITS_BASELINE = SPLITS_2_BASELINE
 MODEL_SELECTION_SPLITS_EBPF     = SPLITS_2_EBPF
 GENERALIZATION_SPLITS_BASELINE  = SPLITS_4_BASELINE
 GENERALIZATION_SPLITS_EBPF      = SPLITS_4_EBPF
+
+# Backward-compatible aliases retained for older notebooks.
+# "PRIMARY" now means the current primary training split, not Split 1.
+PRIMARY_SPLITS_BASELINE = MODEL_SELECTION_SPLITS_BASELINE
+PRIMARY_SPLITS_EBPF     = MODEL_SELECTION_SPLITS_EBPF
+PRIMARY_SPLIT_TAG       = f"split2_balanced_quota_seed{RANDOM_SEED}"
+SPLIT_TAG               = PRIMARY_SPLIT_TAG
 
 # Backward-compatible generic aliases used by older notebooks/scripts.
 # These map to the current training split by default.
