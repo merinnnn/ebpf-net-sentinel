@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Single source of truth for paths, seeds, and split settings shared across
-all experiment notebooks.  Import this at the top of each notebook:
+Single source of truth for all experiment notebooks.
 
-    import sys, os
-    sys.path.insert(0, str(Path.cwd()))        # repo root
-    from ml.notebooks.experiment_config import *
+Split index
+1  split1_group_strat_*      PRIMARY       RQ1-RQ5, all main experiments
+2  split2_balanced_quota_*   COMPARISON    headline confusion matrices / macro-F1
+3  split3_train_resampled_*  IMPROVED      better rare-class learning, same test as Split 1
+4  split4_dual_eval_*        NARRATIVE     balanced + realistic dual evaluation
+5  split5_kfold_groups_*            ROBUSTNESS    mean+/-std over 15 folds
 """
-
 from pathlib import Path
 import os
 
@@ -40,31 +41,50 @@ MERGED_PARQUET = DATASETS_DIR / "cicids2017_multiclass_zeek_ebpf.parquet"
 ZEEK_ONLY_PARQUET = DATASETS_DIR / "cicids2017_multiclass_zeek_only.parquet"
 ZEEK_EBPF_PARQUET = DATASETS_DIR / "cicids2017_multiclass_zeek_plus_ebpf.parquet"
 
-# Split directories (one per strategy × feature-set)
-#
-# PRIMARY strategy: session-aware temporal split  ← new recommended default
-SPLITS_SESSION_TEMPORAL_BASELINE = DATASETS_DIR / f"splits_session_temporal_zeek_only_seed{RANDOM_SEED}"
-SPLITS_SESSION_TEMPORAL_EBPF     = DATASETS_DIR / f"splits_session_temporal_zeek_ebpf_seed{RANDOM_SEED}"
+# Split 1: group-stratified (PRIMARY)
+SPLITS_1_BASELINE = DATASETS_DIR / f"split1_group_strat_baseline_seed{RANDOM_SEED}"
+SPLITS_1_EBPF     = DATASETS_DIR / f"split1_group_strat_ebpf_seed{RANDOM_SEED}"
 
-# SECONDARY strategy: within-day time split  (kept for comparison / reference)
-SPLITS_WITHIN_DAY_BASELINE = DATASETS_DIR / f"splits_within_day_time_zeek_only_seed{RANDOM_SEED}"
-SPLITS_WITHIN_DAY_EBPF     = DATASETS_DIR / f"splits_within_day_time_zeek_ebpf_seed{RANDOM_SEED}"
+# Canonical alias used by all experiment notebooks
+PRIMARY_SPLITS_BASELINE = SPLITS_1_BASELINE
+PRIMARY_SPLITS_EBPF     = SPLITS_1_EBPF
+PRIMARY_SPLIT_TAG       = f"split1_group_strat_seed{RANDOM_SEED}"
+SPLIT_TAG               = PRIMARY_SPLIT_TAG   # backward compat
 
-# TERTIARY strategy: day holdout (generalisation stress-test)
-SPLITS_DAY_HOLDOUT_BASELINE = DATASETS_DIR / "splits_day_holdout_primary_zeek_only"
-SPLITS_DAY_HOLDOUT_EBPF     = DATASETS_DIR / "splits_day_holdout_primary_zeek_ebpf"
+# Split 2: balanced quota (headline comparison)
+SPLITS_2_BASELINE = DATASETS_DIR / f"split2_balanced_quota_baseline_seed{RANDOM_SEED}"
+SPLITS_2_EBPF     = DATASETS_DIR / f"split2_balanced_quota_ebpf_seed{RANDOM_SEED}"
 
-# Output directories
-FEATURE_IMPORTANCE_DIR = REPORTS_DIR / "feature_importance"
+# Split 3: train-resampled (improved learning)
+SPLITS_3_BASELINE = DATASETS_DIR / f"split3_train_resampled_baseline_seed{RANDOM_SEED}"
+SPLITS_3_EBPF     = DATASETS_DIR / f"split3_train_resampled_ebpf_seed{RANDOM_SEED}"
 
-# Experiment naming helpers
-SPLIT_TAG = f"session_temporal_seed{RANDOM_SEED}"
+# Split 4: dual-eval (balanced + realistic)
+SPLITS_4_BASELINE = DATASETS_DIR / f"split4_dual_eval_baseline_seed{RANDOM_SEED}"
+SPLITS_4_EBPF     = DATASETS_DIR / f"split4_dual_eval_ebpf_seed{RANDOM_SEED}"
+
+# Split 5: repeated k-fold (statistical robustness)
+# Keep canonical names aligned with generated dataset folders.
+SPLITS_5_BASELINE = DATASETS_DIR / f"split5_kfold_baseline_seed{RANDOM_SEED}"
+SPLITS_5_EBPF     = DATASETS_DIR / f"split5_kfold_ebpf_seed{RANDOM_SEED}"
+
+# Canonical splits used by current end-to-end notebooks
+# - model selection/training: Split 2 (balanced quota)
+# - distribution-shift generalization check: Split 4 realistic test
+MODEL_SELECTION_SPLITS_BASELINE = SPLITS_2_BASELINE
+MODEL_SELECTION_SPLITS_EBPF     = SPLITS_2_EBPF
+GENERALIZATION_SPLITS_BASELINE  = SPLITS_4_BASELINE
+GENERALIZATION_SPLITS_EBPF      = SPLITS_4_EBPF
+
+# Backward-compatible generic aliases used by older notebooks/scripts.
+# These map to the current training split by default.
+SPLITS_BASELINE = MODEL_SELECTION_SPLITS_BASELINE
+SPLITS_EBPF     = MODEL_SELECTION_SPLITS_EBPF
 
 def run_name(prefix: str, model: str) -> str:
-    """Canonical run name used for output file prefixes."""
     return f"{prefix}_{SPLIT_TAG}_{model}"
 
-# Model hyper-parameters (defaults, override per notebook as needed)
+# Model hyperparameters
 HGB_PARAMS = dict(
     max_iter=300,
     max_depth=8,
@@ -81,18 +101,17 @@ RF_PARAMS = dict(
     n_estimators=200,
     max_depth=20,
     class_weight="balanced_subsample",
-    n_jobs=-1,
+    n_jobs=1,
     random_state=RANDOM_SEED,
 )
 
 IFOREST_PARAMS = dict(
     n_estimators=100,
-    max_samples=256,
-    contamination="auto",   # avoid hardcoding attack ratio
+    max_samples=512,
     random_state=RANDOM_SEED,
     n_jobs=-1,
 )
 
 # Ensure output dirs exist (safe to call at import time)
-for _d in [MODELS_DIR, REPORTS_DIR, FEATURE_IMPORTANCE_DIR]:
+for _d in [MODELS_DIR, REPORTS_DIR, REPORTS_DIR / "feature_importance"]:
     _d.mkdir(parents=True, exist_ok=True)
