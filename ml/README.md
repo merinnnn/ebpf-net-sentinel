@@ -1,15 +1,16 @@
-# ML Complete — Single Guide
+# ML
 
-## Overview
+This folder contains the dataset split builders, model training scripts, notebooks, and a small benchmark harness used in the repo.
 
-This folder contains the **ML experiment runners** for NetSentinel.
+## Layout
 
-- **Scripts** (`core/`, `supervised/`) are meant to be executed from the command line.
-- **Notebook utilities** (`utils/`) are intended for **Jupyter notebooks only**.
+- `ml/data_prep/`: build feature parquets and materialize split directories
+- `ml/methods/`: command-line training scripts for Random Forest and Isolation Forest
+- `ml/deep_learning/`: command-line MLP trainer
+- `ml/notebooks/`: notebook pipeline and shared notebook config
+- `ml/benchmarks/`: overhead / runtime measurement helpers
 
----
-
-## Requirements
+## Environment
 
 ```bash
 python3 -m venv .venv
@@ -17,241 +18,92 @@ source .venv/bin/activate
 pip install -r ml/requirements.txt
 ```
 
----
+Most scripts expect to be run from the repo root.
 
-## Expected inputs (splits)
+## Current split strategy
 
-Most experiments take a `--splits_dir` that contains:
+The project uses the current split set:
+
+- `split1_group_strat_*`: leakage diagnostic only
+- `split2_balanced_quota_*`: model selection and threshold tuning
+- `split3_train_resampled_*`: rare-class training ablation
+- `split4_dual_eval_*`: headline evaluation
+- `split5_kfold_*`: robustness metadata across repeated grouped folds
+
+For Split 4:
+
+- `train.parquet`: Monday-Wednesday
+- `val.parquet`: Thursday
+- `test_realistic.parquet`: Friday holdout
+- `test_balanced.parquet`: class-balanced support set
+
+The notebook aliases for these directories live in [experiment_config.py](/mnt/c/Users/merin/Documents/GitHub/ebpf-net-sentinel/ml/notebooks/experiment_config.py).
+
+## Recommended workflow
+
+1. Build the feature parquets with `ml/data_prep/make_datasets.py`.
+2. Materialize the split directories from `ml/data_prep/`.
+3. Run `ml/notebooks/00_data_preparation.ipynb` to validate the split outputs.
+4. Run `ml/notebooks/01_baseline_vs_ebpf.ipynb` for the full experiment:
+   use Split 2 for model selection, then Split 4 `test_realistic` for the headline result.
+5. Use notebooks `02` to `05` for supporting analysis.
+
+## Command-line trainers
+
+All training scripts expect a split directory that contains at least:
 
 - `train.parquet`
 - `val.parquet`
 - `test.parquet`
 
-Example:
+Examples:
 
 ```bash
-data/datasets/
-  splits_zeek_only/
-    train.parquet
-    val.parquet
-    test.parquet
-  splits_zeek_plus_ebpf/
-    train.parquet
-    val.parquet
-    test.parquet
-```
-
----
-
-## Outputs
-
-By default experiments write to:
-
-- models: `data/models/`
-- reports: `data/reports/`
-
-The `--run_name` is used as a prefix for output filenames.
-
----
-
-## How to Run Experiments
-
-All commands below assume you are at the **repo root** (the folder that contains `ml/` and `data/`).
-
-> Tip: use a virtualenv and install requirements first.
-
----
-
-## 0) Prepare data
-
-```bash
-python3 ml/data_prep/make_datasets.py --in_parquet data/datasets/cicids2017_multiclass_merged.parquet --out_baseline data/datasets/cicids2017_multiclass_zeek_only.parquet --out_enhanced data/datasets/cicids2017_multiclass_zeek_plus_ebpf.parquet --report_dir data/reports
-
-python3 ml/data_prep/split_by_day.py --in_parquet data/datasets/cicids2017_multiclass_zeek_only.parquet --out_dir data/datasets/splits_zeek_only_primary --split primary
-
-python3 ml/data_prep/split_by_day.py --in_parquet data/datasets/cicids2017_multiclass_zeek_plus_ebpf.parquet --out_dir data/datasets/splits_zeek_plus_ebpf_primary --split primary
-```
-
----
-
-## 1) Train/evaluate supervised baselines (Zeek-only vs Zeek+eBPF)
-
-This is the main “baseline suite” runner (dummy + logistic regression, etc.):
-
-```bash
-python3 ml/scripts/train_eval.py \
-  --splits_dir data/datasets/splits_zeek_only \
-  --run_name zeek_only_primary_v2 \
-  --out_models_dir data/models \
-  --out_reports_dir data/reports \
-  --topk_cats 50
-
-python3 ml/scripts/train_eval.py \
-  --splits_dir data/datasets/splits_zeek_plus_ebpf \
-  --run_name zeek_plus_ebpf_primary_v2 \
-  --out_models_dir data/models \
-  --out_reports_dir data/reports \
-  --topk_cats 50
-```
-
-Optional flags (see `--help` for full list):
-
-- `--balanced_logreg` to use `class_weight='balanced'` for LogisticRegression.
-
----
-
-## 2) Train Isolation Forest (unsupervised anomaly detector)
-
-```bash
-python3 ml/methods/unsupervised_iforest/train_iforest.py \
-  --splits_dir data/datasets/splits_zeek_only \
-  --run_name iforest_zeek_only \
+python3 ml/methods/supervised_rf/train_random_forest.py \
+  --splits_dir data/datasets/split2_balanced_quota_baseline_seed42 \
+  --run_name baseline_rf_split2_seed42 \
   --out_models_dir data/models \
   --out_reports_dir data/reports
 
 python3 ml/methods/unsupervised_iforest/train_iforest.py \
-  --splits_dir data/datasets/splits_zeek_plus_ebpf \
-  --run_name iforest_zeek_plus_ebpf \
+  --splits_dir data/datasets/split2_balanced_quota_baseline_seed42 \
+  --run_name baseline_iforest_split2_seed42 \
+  --out_models_dir data/models \
+  --out_reports_dir data/reports
+
+python3 ml/deep_learning/train_mlp_binary.py \
+  --splits_dir data/datasets/split2_balanced_quota_baseline_seed42 \
+  --run_name baseline_mlp_split2_seed42 \
   --out_models_dir data/models \
   --out_reports_dir data/reports
 ```
 
----
+The scripts emit the same high-level log structure:
 
-## 3) Train Random Forest (supervised classifier)
+- run header and paths
+- split sizes
+- preprocessing summary
+- feature summary
+- tuning decisions
+- train / validation / test metrics
+- per-attack test detection
+- saved artifact paths
 
-```bash
-python3 ml/methods/supervised_rf/train_random_forest.py \
-  --splits_dir data/datasets/splits_zeek_only \
-  --run_name rf_zeek_only \
-  --out_models_dir data/models \
-  --out_reports_dir data/reports
+## Overheads benchmark
 
-python3 ml/methods/supervised_rf/train_random_forest.py \
-  --splits_dir data/datasets/splits_zeek_plus_ebpf \
-  --run_name rf_zeek_plus_ebpf \
-  --out_models_dir data/models \
-  --out_reports_dir data/reports
-```
-
----
-
-## 4) Split dataset by day (helper)
-
-If your merged dataset has a `day` column and you want consistent day-based train/val/test splits:
+Use [overheads.py](/mnt/c/Users/merin/Documents/GitHub/ebpf-net-sentinel/ml/benchmarks/overheads.py) with the same Split 4 directories used for the headline evaluation:
 
 ```bash
-python3 ml/data_prep/split_by_day.py \
-  --in_parquet data/datasets/your_merged.parquet \
-  --out_dir data/datasets/splits_custom_primary
+python3 ml/benchmarks/overheads.py \
+  --baseline_splits_dir data/datasets/split4_dual_eval_baseline_seed42 \
+  --ebpf_splits_dir     data/datasets/split4_dual_eval_ebpf_seed42 \
+  --test_file test_realistic \
+  --out_json data/reports/rq4_overheads/rq4_overheads.json \
+  --out_dir  data/reports/rq4_overheads/artifacts
 ```
-
-This writes `train.parquet`, `val.parquet`, `test.parquet` under `--out_dir`.
-
----
-
-## 5) Run everything (batch script)
-
-```bash
-bash ml/RUN_ALL_EXPERIMENTS.sh
-```
-
-This expects the standard split directories to exist (see the script header for the exact names).
-
----
-
-## What to Expect
-
-This file is here so you can quickly sanity-check that an experiment ran correctly.
-
----
-
-## Logging format
-
-Scripts print a small number of lines in the format:
-
-- `[*]` progress / stage
-- `[+]` success
-- `[!]` warning (non-fatal)
-- `[x]` error (fatal)
-
----
-
-## Expected outputs
-
-### Supervised baselines (`supervised/train_eval.py`)
-
-Typical outputs:
-
-- `data/models/<run_name>_dummy_mostfreq.joblib`
-- `data/models/<run_name>_logreg.joblib` (and/or variants)
-- `data/reports/<run_name>_*_classification_report.txt`
-- `data/reports/<run_name>_*_confusion.png`
-
-If you run both **zeek-only** and **zeek+eBPF** with the same settings, you should end up with two comparable sets of reports.
-
-### Isolation Forest (`core/train_iforest_complete.py`)
-
-Typical outputs:
-
-- `data/models/<run_name>_iforest.joblib`
-- `data/reports/<run_name>_iforest_*.txt`
-- `data/reports/<run_name>_iforest_*.png`
-
-### Random Forest (`core/train_random_forest.py`)
-
-Typical outputs:
-
-- `data/models/<run_name>_rf.joblib`
-- `data/reports/<run_name>_rf_*.txt`
-- `data/reports/<run_name>_rf_*.png`
-
----
 
 ## Common failure modes
 
-### 1) “file not found” for splits
-
-Your `--splits_dir` must contain:
-
-- `train.parquet`
-- `val.parquet`
-- `test.parquet`
-
-### 2) Missing columns
-
-Some scripts expect at least:
-
-- labels: `label_family` (and/or `is_attack`)
-- metadata: `day` (only for day-based splitting)
-
-If your dataset schema differs, check `drop = [...]` lists in the scripts and adjust.
-
-### 3) Parquet engine errors
-
-If pandas complains about Parquet support, install the recommended engine:
-
-```bash
-pip install pyarrow
-```
-
----
-
-## Quick sanity-checks
-
-- Reports directory contains new files with your `--run_name`
-- Confusion matrix PNGs open correctly
-- Classification report shows non-zero support for major classes (not everything collapsed to one class)
-
-## Folder structure (recommended)
-
-- `ml/data_prep/` – build datasets and create splits (including `within_day_time` split to avoid missing attack families)
-- `ml/methods/` – training scripts grouped by methodology
-  - `supervised_rf/`
-  - `unsupervised_iforest/`
-- `ml/analysis/` – feature importance + comparisons
-- `ml/scripts/` – full pipeline runners (wrapper remains at `ml/RUN_ALL_EXPERIMENTS.sh`)
-
-### Why `within_day_time` splits?
-
-CICIDS2017 attack families are concentrated on specific days. Holding out an entire day often means some attack families are **never seen during training**, which makes supervised results look "broken". `within_day_time` keeps every day present across train/val/test while still being time-ordered.
+- Missing split files: verify the target split directory contains the parquet files the script expects.
+- Missing parquet engine: install `pyarrow`.
+- Schema drift: if a dataset changed column names, update the feature-drop lists in the relevant training script.
