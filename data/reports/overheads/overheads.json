@@ -1,0 +1,104 @@
+{
+  "system": {
+    "timestamp_utc": "2026-03-03T13:10:47Z",
+    "python": "3.10.12",
+    "platform": "Linux-6.6.87.2-microsoft-standard-WSL2+-x86_64-with-glibc2.35",
+    "machine": "x86_64",
+    "cpu_count": 16
+  },
+  "inputs": {
+    "baseline_splits_dir": "/mnt/c/Users/merin/Documents/GitHub/ebpf-net-sentinel/data/datasets/split4_dual_eval_baseline_seed42",
+    "ebpf_splits_dir": "/mnt/c/Users/merin/Documents/GitHub/ebpf-net-sentinel/data/datasets/split4_dual_eval_ebpf_seed42",
+    "baseline_model_pack": "/mnt/c/Users/merin/Documents/GitHub/ebpf-net-sentinel/data/models/baseline_headline_model_seed42.joblib",
+    "ebpf_model_pack": "/mnt/c/Users/merin/Documents/GitHub/ebpf-net-sentinel/data/models/ebpf_headline_model_seed42.joblib",
+    "test_file": "test_realistic",
+    "label_col": "is_attack",
+    "skip_training": true
+  },
+  "load_times_seconds": {
+    "baseline_train": 1.7834485310013406,
+    "baseline_test": 0.8033847869955935,
+    "ebpf_train": 1.8318021110026166,
+    "ebpf_test": 0.7458899600023869
+  },
+  "dataset_shapes": {
+    "baseline_train": [
+      1205997,
+      30
+    ],
+    "baseline_test": [
+      546207,
+      30
+    ],
+    "ebpf_train": [
+      1205997,
+      38
+    ],
+    "ebpf_test": [
+      546207,
+      38
+    ]
+  },
+  "benchmark_protocol": {
+    "train_load_measurement": "wall_clock_seconds_to_read_train_parquet",
+    "test_load_measurement": "wall_clock_seconds_to_read_requested_test_parquet",
+    "inference_measurement": "saved-artifact scoring latency on a fixed first-N-row sample after one warmup pass; reported as mean/std seconds and ms per 1k rows",
+    "test_file": "test_realistic",
+    "infer_sample_n": 10000,
+    "infer_repeats": 7,
+    "skip_training": true
+  },
+  "models": [
+    {
+      "dataset": "baseline",
+      "model": "hgb_balanced",
+      "artifact_path": "/mnt/c/Users/merin/Documents/GitHub/ebpf-net-sentinel/data/models/baseline_headline_model_seed42.joblib",
+      "artifact_copy_path": "data/reports/overheads/artifacts/baseline_headline_model.joblib",
+      "artifact_load_seconds": 0.46605296901543625,
+      "fit_seconds": null,
+      "latency_mean_seconds": 0.04811210657187205,
+      "latency_std_seconds": 0.0052531438652848005,
+      "infer_ms_per_1k": 4.811210657187205,
+      "model_size_bytes": 1113173,
+      "test_auc": 0.920167789289307,
+      "test_ap": 0.8575172215506839,
+      "n_train": null,
+      "n_test": 546207,
+      "n_features": 10,
+      "threshold_mode": "matched_recall",
+      "threshold": 0.0008563202432689416,
+      "infer_rows_benchmarked": 10000,
+      "latency_repeats": 7,
+      "latency_warmup_rows": 256,
+      "score_method": "predict_proba",
+      "sample_selection": "first_n_rows_after_feature_alignment",
+      "benchmark_mode": "saved_artifact_split4_realistic_fixed_sample"
+    },
+    {
+      "dataset": "ebpf",
+      "model": "hgb_balanced",
+      "artifact_path": "/mnt/c/Users/merin/Documents/GitHub/ebpf-net-sentinel/data/models/ebpf_headline_model_seed42.joblib",
+      "artifact_copy_path": "data/reports/overheads/artifacts/ebpf_headline_model.joblib",
+      "artifact_load_seconds": 0.35367615800350904,
+      "fit_seconds": null,
+      "latency_mean_seconds": 0.053687630857374255,
+      "latency_std_seconds": 0.03984452182650697,
+      "infer_ms_per_1k": 5.3687630857374256,
+      "model_size_bytes": 1117911,
+      "test_auc": 0.7115036219893844,
+      "test_ap": 0.7154877259841218,
+      "n_train": null,
+      "n_test": 546207,
+      "n_features": 17,
+      "threshold_mode": "matched_recall",
+      "threshold": 0.0004472946219706496,
+      "infer_rows_benchmarked": 10000,
+      "latency_repeats": 7,
+      "latency_warmup_rows": 256,
+      "score_method": "predict_proba",
+      "sample_selection": "first_n_rows_after_feature_alignment",
+      "benchmark_mode": "saved_artifact_split4_realistic_fixed_sample"
+    }
+  ],
+  "netmon_overhead": null
+}
