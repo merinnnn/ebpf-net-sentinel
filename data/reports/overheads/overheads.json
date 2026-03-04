@@ -1,6 +1,6 @@
 {
   "system": {
-    "timestamp_utc": "2026-03-03T13:10:47Z",
+    "timestamp_utc": "2026-03-04T12:56:45Z",
     "python": "3.10.12",
     "platform": "Linux-6.6.87.2-microsoft-standard-WSL2+-x86_64-with-glibc2.35",
     "machine": "x86_64",
@@ -16,10 +16,10 @@
     "skip_training": true
   },
   "load_times_seconds": {
-    "baseline_train": 1.7834485310013406,
-    "baseline_test": 0.8033847869955935,
-    "ebpf_train": 1.8318021110026166,
-    "ebpf_test": 0.7458899600023869
+    "baseline_train": 1.4593621430012718,
+    "baseline_test": 0.5978881510000065,
+    "ebpf_train": 1.38298356300038,
+    "ebpf_test": 0.7553220969984977
   },
   "dataset_shapes": {
     "baseline_train": [
@@ -54,11 +54,11 @@
       "model": "hgb_balanced",
       "artifact_path": "/mnt/c/Users/merin/Documents/GitHub/ebpf-net-sentinel/data/models/baseline_headline_model_seed42.joblib",
       "artifact_copy_path": "data/reports/overheads/artifacts/baseline_headline_model.joblib",
-      "artifact_load_seconds": 0.46605296901543625,
+      "artifact_load_seconds": 0.2896073530009744,
       "fit_seconds": null,
-      "latency_mean_seconds": 0.04811210657187205,
-      "latency_std_seconds": 0.0052531438652848005,
-      "infer_ms_per_1k": 4.811210657187205,
+      "latency_mean_seconds": 0.05593626600005207,
+      "latency_std_seconds": 0.03280369899068284,
+      "infer_ms_per_1k": 5.593626600005207,
       "model_size_bytes": 1113173,
       "test_auc": 0.920167789289307,
       "test_ap": 0.8575172215506839,
@@ -79,11 +79,11 @@
       "model": "hgb_balanced",
       "artifact_path": "/mnt/c/Users/merin/Documents/GitHub/ebpf-net-sentinel/data/models/ebpf_headline_model_seed42.joblib",
       "artifact_copy_path": "data/reports/overheads/artifacts/ebpf_headline_model.joblib",
-      "artifact_load_seconds": 0.35367615800350904,
+      "artifact_load_seconds": 0.3530198479984392,
       "fit_seconds": null,
-      "latency_mean_seconds": 0.053687630857374255,
-      "latency_std_seconds": 0.03984452182650697,
-      "infer_ms_per_1k": 5.3687630857374256,
+      "latency_mean_seconds": 0.05182177571467556,
+      "latency_std_seconds": 0.019199742250262643,
+      "infer_ms_per_1k": 5.182177571467556,
       "model_size_bytes": 1117911,
       "test_auc": 0.7115036219893844,
       "test_ap": 0.7154877259841218,
