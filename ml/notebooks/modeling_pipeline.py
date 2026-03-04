@@ -14,7 +14,7 @@ from sklearn.base import clone
 from sklearn.ensemble import ExtraTreesClassifier, HistGradientBoostingClassifier, RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score, average_precision_score, roc_curve
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score, average_precision_score, roc_curve, confusion_matrix
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -72,11 +72,18 @@ def align_to_features(X: pd.DataFrame, features: List[str]) -> pd.DataFrame:
     return out[features]
 
 def binary_metrics(y_true: np.ndarray, y_pred: np.ndarray, y_prob: np.ndarray | None = None) -> Dict[str, float | None]:
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+    fpr = float(fp / max(fp + tn, 1))
     metrics: Dict[str, float | None] = {
         "accuracy": float(accuracy_score(y_true, y_pred)),
         "precision": float(precision_score(y_true, y_pred, zero_division=0)),
         "recall": float(recall_score(y_true, y_pred, zero_division=0)),
         "f1": float(f1_score(y_true, y_pred, zero_division=0)),
+        "fpr": fpr,
+        "tn": int(tn),
+        "fp": int(fp),
+        "fn": int(fn),
+        "tp": int(tp),
         "roc_auc": None,
         "pr_auc": None,    # Average Precision (honest with imbalanced data)
     }
@@ -122,6 +129,51 @@ def tune_threshold_for_fpr(y_val: np.ndarray, y_prob_val: np.ndarray, target_fpr
     # pick threshold with max TPR among ok; if ties, prefer higher threshold (fewer alerts)
     best = ok[np.argmax(tpr[ok])]
     return float(thr[int(best)])
+
+def tune_threshold_for_recall(y_val: np.ndarray, y_prob_val: np.ndarray, target_recall: float = 0.40) -> float:
+    """
+    Choose the HIGHEST threshold that still achieves recall >= target_recall on validation.
+
+    This is useful for matched-recall comparisons where the question is whether one
+    feature set can achieve the same recall with fewer false positives.
+    """
+    if len(np.unique(y_val)) < 2:
+        return 0.5
+    target_recall = float(np.clip(target_recall, 0.0, 1.0))
+    fpr, tpr, thr = roc_curve(y_val, y_prob_val)
+    ok = np.where(tpr >= target_recall)[0]
+    if len(ok) == 0:
+        return float(np.min(thr))
+    best = ok[np.argmin(fpr[ok])]
+    tied = ok[np.where(fpr[ok] == fpr[best])[0]]
+    if len(tied) > 1:
+        best = tied[np.argmax(thr[tied])]
+    return float(thr[int(best)])
+
+def select_threshold(
+    y_val: np.ndarray,
+    y_prob_val: np.ndarray,
+    *,
+    threshold_mode: str = "f1",
+    target_fpr: float = 0.001,
+    target_recall: float | None = None,
+) -> float:
+    mode = str(threshold_mode).lower()
+    if mode == "fpr":
+        return tune_threshold_for_fpr(y_val, y_prob_val, target_fpr=target_fpr)
+    if mode == "recall":
+        if target_recall is None:
+            raise ValueError("threshold_mode='recall' requires target_recall")
+        return tune_threshold_for_recall(y_val, y_prob_val, target_recall=target_recall)
+    if mode != "f1":
+        raise ValueError(f"Unsupported threshold_mode: {threshold_mode}")
+    return tune_threshold_on_val(y_val, y_prob_val)
+
+def metrics_at_threshold(y_true: np.ndarray, y_score: np.ndarray, threshold: float) -> Dict[str, float | None]:
+    y_pred = (y_score >= float(threshold)).astype(int)
+    metrics = binary_metrics(y_true, y_pred, y_score)
+    metrics["threshold"] = float(threshold)
+    return metrics
 
 def model_candidates(seed: int = 42) -> Dict[str, Pipeline]:
     """
@@ -204,17 +256,20 @@ def _predict_scores(model: Pipeline, X: pd.DataFrame) -> np.ndarray:
     return score
 
 def evaluate_candidate(model: Pipeline, X_tr: pd.DataFrame, y_tr: np.ndarray, X_va: pd.DataFrame, y_va: np.ndarray,
-                       *, threshold_mode: str = "f1", target_fpr: float = 0.001) -> dict:
+                       *, threshold_mode: str = "f1", target_fpr: float = 0.001,
+                       target_recall: float | None = None) -> dict:
     model.fit(X_tr, y_tr)
     tr_prob = _predict_scores(model, X_tr)
     va_prob = _predict_scores(model, X_va)
 
     # Choose decision threshold on validation
-    threshold_mode = str(threshold_mode).lower()
-    if threshold_mode == "fpr":
-        best_thr = tune_threshold_for_fpr(y_va, va_prob, target_fpr=target_fpr)
-    else:
-        best_thr = tune_threshold_on_val(y_va, va_prob)
+    best_thr = select_threshold(
+        y_va,
+        va_prob,
+        threshold_mode=threshold_mode,
+        target_fpr=target_fpr,
+        target_recall=target_recall,
+    )
 
     tr_pred = (tr_prob >= best_thr).astype(int)
     va_pred = (va_prob >= best_thr).astype(int)
@@ -361,6 +416,7 @@ def fit_model_family_on_split(
     seed: int = 42,
     threshold_mode: str = "f1",
     target_fpr: float = 0.001,
+    target_recall: float | None = None,
 ) -> Dict[str, object]:
     train_df, val_df, test_df = load_split(split_dir, test_file=test_file)
     tr = prepare_split(train_df, feature_list=feature_list)
@@ -381,6 +437,7 @@ def fit_model_family_on_split(
         va.y,
         threshold_mode=threshold_mode,
         target_fpr=target_fpr,
+        target_recall=target_recall,
     )
 
     te_prob = _predict_scores(res["model"], Xte)
@@ -402,11 +459,15 @@ def fit_model_family_on_split(
         "y_test": te.y,
         "y_score": te_prob,
         "y_pred": te_pred,
+        "y_val": va.y,
+        "y_val_score": res["val_prob"],
+        "y_val_pred": res["val_pred"],
         "labels_test": te.labels,
         "n_rows": int(len(te.y)),
         "n_attacks": int(te.y.sum()),
         "threshold_mode": threshold_mode,
         "target_fpr": float(target_fpr),
+        "target_recall": None if target_recall is None else float(target_recall),
     }
 
 def per_attack_detection_rates(model: Pipeline, X: pd.DataFrame, labels: pd.Series) -> pd.DataFrame:
