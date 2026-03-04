@@ -53,6 +53,13 @@ data/reports/overheads/*
 !data/reports/overheads/netmon_live*.csv
 !data/reports/overheads/netmon_live*.png
 
+!data/reports/overheads/netmon_live_run1_plots_seed42.png
+!data/reports/overheads/netmon_live_run1_plots_seed42.csv
+!data/reports/overheads/netmon_live_run2_plots_seed42.png
+!data/reports/overheads/netmon_live_run2_plots_seed42.csv
+!data/reports/overheads/netmon_live_run3_plots_seed42.png
+!data/reports/overheads/netmon_live_run3_plots_seed42.csv
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
