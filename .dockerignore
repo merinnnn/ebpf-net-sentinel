@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.git/
+.venv/
+.env
+*.log
+
+ml/notebooks/
+ml/notebooks/data/
+app/.streamlit/secrets.toml
