@@ -23,91 +23,91 @@ import (
 )
 
 type Event struct {
-	TsNs uint64
+	TsNs uint64 // time when the kernel recorded this event
 
-	Pid uint32
-	Uid uint32
+	Pid uint32 // process id linked to this event
+	Uid uint32 // user id linked to this event
 
-	Saddr uint32
-	Daddr uint32
+	Saddr uint32 // source IP address as a number
+	Daddr uint32 // destination IP address as a number
 
-	Sport uint16
-	Dport uint16
+	Sport uint16 // source port number
+	Dport uint16 // destination port number
 
-	Proto  uint8
-	Evtype uint8
+	Proto  uint8 // network protocol, like TCP or UDP
+	Evtype uint8 // what kind of network event this is
 
-	Pad0 uint16 // padding to align next uint32
+	Pad0 uint16 // extra space so the next field starts in the right place
 
-	StateOld uint32
-	StateNew uint32
+	StateOld uint32 // earlier TCP state, or packet direction for packet events
+	StateNew uint32 // new TCP state after the change
 
-	Bytes       uint64
-	Retransmits uint32
+	Bytes       uint64 // byte count tied to this event
+	Retransmits uint32 // how many retransmits this event adds
 
-	Comm   [16]byte
-	PadEnd uint32 // explicit tail pad (matches C struct)
+	Comm   [16]byte // short process name from the kernel
+	PadEnd uint32   // extra space at the end so this matches the C struct
 }
 
 type FlowKey struct {
-	Saddr uint32
-	Daddr uint32
-	Sport uint16
-	Dport uint16
-	Proto uint8
+	Saddr uint32 // source IP used to identify one flow
+	Daddr uint32 // destination IP used to identify one flow
+	Sport uint16 // source port used to identify one flow
+	Dport uint16 // destination port used to identify one flow
+	Proto uint8  // protocol used to identify one flow
 }
 
 type FlowAgg struct {
-	FirstMonoNs uint64 `json:"first_ts_ns"`
-	LastMonoNs  uint64 `json:"last_ts_ns"`
+	FirstMonoNs uint64 `json:"first_ts_ns"` // first kernel-time value seen for this flow
+	LastMonoNs  uint64 `json:"last_ts_ns"`  // most recent kernel-time value seen for this flow
 
-	FirstEpochS float64 `json:"first_ts_s"`
-	LastEpochS  float64 `json:"last_ts_s"`
-	FlushEpochS float64 `json:"flush_ts_s"`
+	FirstEpochS float64 `json:"first_ts_s"` // first timestamp converted into normal Unix time
+	LastEpochS  float64 `json:"last_ts_s"`  // latest timestamp converted into normal Unix time
+	FlushEpochS float64 `json:"flush_ts_s"` // time when this summary was written out
 
-	Saddr uint32 `json:"saddr"`
-	Daddr uint32 `json:"daddr"`
-	Sport uint16 `json:"sport"`
-	Dport uint16 `json:"dport"`
-	Proto uint8  `json:"proto"`
+	Saddr uint32 `json:"saddr"` // source IP address as a number
+	Daddr uint32 `json:"daddr"` // destination IP address as a number
+	Sport uint16 `json:"sport"` // source port number
+	Dport uint16 `json:"dport"` // destination port number
+	Proto uint8  `json:"proto"` // network protocol number
 
-	SaddrStr string `json:"saddr_str"`
-	DaddrStr string `json:"daddr_str"`
+	SaddrStr string `json:"saddr_str"` // source IP address in normal text form
+	DaddrStr string `json:"daddr_str"` // destination IP address in normal text form
 
-	BytesSent    uint64 `json:"bytes_sent"`
-	BytesRecv    uint64 `json:"bytes_recv"`
-	Retransmits  uint32 `json:"retransmits"`
-	StateChanges uint32 `json:"state_changes"`
-	Samples      uint64 `json:"samples"`
+	BytesSent    uint64 `json:"bytes_sent"`    // total sent bytes for this flow
+	BytesRecv    uint64 `json:"bytes_recv"`    // total received bytes for this flow
+	Retransmits  uint32 `json:"retransmits"`   // total retransmit count for this flow
+	StateChanges uint32 `json:"state_changes"` // how many TCP state changes we saw
+	Samples      uint64 `json:"samples"`       // how many events were merged into this flow
 
-	PidMode  uint32 `json:"pid_mode"`
-	UidMode  uint32 `json:"uid_mode"`
-	CommMode string `json:"comm_mode"`
+	PidMode  uint32 `json:"pid_mode"`  // latest process id seen for this flow
+	UidMode  uint32 `json:"uid_mode"`  // latest user id seen for this flow
+	CommMode string `json:"comm_mode"` // latest process name seen for this flow
 }
 
 type RawEventOut struct {
-	TsMonoNs uint64  `json:"ts_ns"`
-	TsEpochS float64 `json:"ts_s"`
+	TsMonoNs uint64  `json:"ts_ns"` // original kernel timestamp for one event
+	TsEpochS float64 `json:"ts_s"`  // the same time converted into normal Unix time
 
-	Pid  uint32 `json:"pid"`
-	Uid  uint32 `json:"uid"`
-	Comm string `json:"comm"`
+	Pid  uint32 `json:"pid"`  // process id linked to this event
+	Uid  uint32 `json:"uid"`  // user id linked to this event
+	Comm string `json:"comm"` // process name linked to this event
 
-	Saddr uint32 `json:"saddr"`
-	Daddr uint32 `json:"daddr"`
-	Sport uint16 `json:"sport"`
-	Dport uint16 `json:"dport"`
-	Proto uint8  `json:"proto"`
+	Saddr uint32 `json:"saddr"` // source IP address as a number
+	Daddr uint32 `json:"daddr"` // destination IP address as a number
+	Sport uint16 `json:"sport"` // source port number
+	Dport uint16 `json:"dport"` // destination port number
+	Proto uint8  `json:"proto"` // network protocol number
 
-	SaddrStr string `json:"saddr_str"`
-	DaddrStr string `json:"daddr_str"`
+	SaddrStr string `json:"saddr_str"` // source IP address in normal text form
+	DaddrStr string `json:"daddr_str"` // destination IP address in normal text form
 
-	Evtype   uint8  `json:"evtype"`
-	StateOld uint32 `json:"state_old"`
-	StateNew uint32 `json:"state_new"`
+	Evtype   uint8  `json:"evtype"`    // what kind of network event this is
+	StateOld uint32 `json:"state_old"` // earlier TCP state, or packet direction for packet events
+	StateNew uint32 `json:"state_new"` // new TCP state after the change
 
-	Bytes       uint64 `json:"bytes"`
-	Retransmits uint32 `json:"retransmits"`
+	Bytes       uint64 `json:"bytes"`       // byte count tied to this event
+	Retransmits uint32 `json:"retransmits"` // how many retransmits this event adds
 }
 
 func must(err error) {
@@ -123,13 +123,14 @@ func ntohl(u uint32) uint32 {
 		(u&0xFF000000)>>24
 }
 
-// Convert uint32 in host byte order to IPv4 string
+// Turn a 32-bit number into a normal IPv4 text address.
+// This version is for values already arranged the way this machine expects.
 func u32ToIPv4Str(u uint32) string {
 	b := []byte{byte(u), byte(u >> 8), byte(u >> 16), byte(u >> 24)}
 	return net.IP(b).String()
 }
 
-// Convert uint32 in network byte order to IPv4 string
+// Same idea as above, but this version is for values still stored in network order.
 func u32ToIPv4StrBE(u uint32) string {
 	b := []byte{byte(u >> 24), byte(u >> 16), byte(u >> 8), byte(u)}
 	return net.IP(b).String()
@@ -143,7 +144,8 @@ func cstr(b []byte) string {
 	return string(b[:n])
 }
 
-// Map monotonic (kernel) timestamps to wall-clock epoch seconds.
+// The kernel gives us time from a clock that only moves forward.
+// This converts that into regular Unix time so the output is easier to read.
 func monoToEpochSec(monoNs uint64, baseEpoch time.Time, baseMonoNs uint64) float64 {
 	if monoNs < baseMonoNs {
 		return float64(baseEpoch.UnixNano()) / 1e9
@@ -159,7 +161,8 @@ const (
 
 func htons(v uint16) uint16 { return (v<<8)&0xff00 | (v>>8)&0x00ff }
 
-// Open AF_PACKET socket bound to iface, for attaching socket filter (SO_ATTACH_BPF).
+// Open a raw packet socket on one network interface.
+// We use this when we want the packet filter program to see traffic directly.
 func openAndBindAFPacket(iface string) (int, error) {
 	ifc, err := net.InterfaceByName(iface)
 	if err != nil {
@@ -187,7 +190,7 @@ func attachSocketFilter(fd int, prog *ebpf.Program) error {
 }
 
 func detachSocketFilter(fd int) error {
-	// SO_DETACH_BPF ignores optval; use 0.
+	// This kernel call ignores the last value, so 0 is fine here.
 	return unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_DETACH_BPF, 0)
 }
 
@@ -245,11 +248,11 @@ func main() {
 	flag.Parse()
 
 	if metaPath == "" {
-		// Keep behavior consistent with your script expectation.
+		// If no meta file was requested, write one next to the main output.
 		metaPath = outPath + ".meta.json"
 	}
 
-	// Avoid memlock issues
+	// Raise the memory limit so loading BPF objects is less likely to fail.
 	_ = rlimit.RemoveMemlock()
 
 	spec, err := ebpf.LoadCollectionSpec(objPath)
@@ -264,7 +267,7 @@ func main() {
 		log.Fatalf("ringbuf map 'rb' not found")
 	}
 
-	// Attach programs (kprobes/tracepoints)
+	// Keep track of every attached kernel hook so we can close them later.
 	var links []link.Link
 	defer func() {
 		for _, l := range links {
@@ -272,7 +275,7 @@ func main() {
 		}
 	}()
 
-	// Optional socket filter for tcpreplay visibility.
+	// If an interface was given, also attach the packet watcher there.
 	pktFd := -1
 	if pktIface != "" {
 		prog := coll.Programs["sock_packet"]
@@ -313,7 +316,7 @@ func main() {
 	must(err)
 	defer rd.Close()
 
-	// Stopping coordination: close rd to unblock rd.Read()
+	// This setup lets Ctrl+C stop the reader cleanly instead of leaving it blocked.
 	stopCh := make(chan os.Signal, 2)
 	signal.Notify(stopCh, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(stopCh)
@@ -328,14 +331,14 @@ func main() {
 	}
 
 	go func() {
-		// stop on first signal
+		// As soon as we get one stop signal, begin shutdown.
 		for range stopCh {
 			stop()
 			return
 		}
 	}()
 
-	// Monotonic → epoch base
+	// Take one snapshot of both clocks so we can translate kernel time later.
 	var ts unix.Timespec
 	must(unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts))
 	baseMonoNs := uint64(ts.Sec)*1e9 + uint64(ts.Nsec)
@@ -380,12 +383,12 @@ func main() {
 		flows = make(map[FlowKey]*FlowAgg)
 	}
 
-	// periodic flush ticker
+	// This timer writes the current flow summaries to disk every few seconds.
 	flushTicker := time.NewTicker(time.Duration(flushSec) * time.Second)
-	// progress logger
+	// This timer prints small progress updates while the program is running.
 	progress := time.NewTicker(2 * time.Second)
 
-	// Stop tickers on exit
+	// Always stop the timers when the program exits.
 	defer flushTicker.Stop()
 	defer progress.Stop()
 
@@ -418,12 +421,12 @@ func main() {
 
 	log.Printf(`[*] eBPF collector running (mode=%s flush=%ds pkt_iface=%q disable_kprobes=%v)`, mode, flushSec, pktIface, disableKprobes)
 
-	// Main read loop
+	// Read events from the kernel one by one until we are told to stop.
 	want := binary.Size(Event{})
 	for {
 		rec, err := rd.Read()
 		if err != nil {
-			// If we're stopping, do NOT spin forever on non-ErrClosed errors.
+			// If shutdown has started, leave the loop instead of retrying forever.
 			select {
 			case <-stopping:
 				goto DONE
@@ -434,7 +437,7 @@ func main() {
 				break
 			}
 
-			// transient error while running
+			// Ignore short-lived read errors and keep listening.
 			continue
 		}
 
@@ -448,20 +451,19 @@ func main() {
 		}
 		eventsRead++
 
-		// Handle byte order based on event type
-		// evtype=5 (socket filter/packet events): IPs are in network byte order
-		// evtype=1,2,3,4 (kprobes): IPs are already in host byte order
+		// Packet events store IPs one way, and kprobe events store them another way.
+		// We fix that here so everything below can use one consistent format.
 		var saddrU32, daddrU32 uint32
 		var saddrStr, daddrStr string
 
 		if e.Evtype == 5 {
-			// Socket filter event - IPs in network byte order, need conversion
+			// Packet watcher events need byte-order conversion first.
 			saddrU32 = ntohl(e.Saddr)
 			daddrU32 = ntohl(e.Daddr)
 			saddrStr = u32ToIPv4StrBE(saddrU32)
 			daddrStr = u32ToIPv4StrBE(daddrU32)
 		} else {
-			// Kprobe event - IPs already in host byte order
+			// Socket hook events are already in the format we want.
 			saddrU32 = e.Saddr
 			daddrU32 = e.Daddr
 			saddrStr = u32ToIPv4Str(saddrU32)
@@ -525,7 +527,7 @@ func main() {
 			a.LastEpochS = evEpoch
 			a.Samples++
 
-			// last-seen process
+			// Keep the latest process details we saw for this flow.
 			a.PidMode = e.Pid
 			a.UidMode = e.Uid
 			a.CommMode = commStr
@@ -540,7 +542,7 @@ func main() {
 			case 4:
 				a.Retransmits += e.Retransmits
 			case 5:
-				// packet events: state_old carries skb->pkt_type
+				// For packet events, StateOld is reused to tell us packet direction.
 				if e.StateOld == packetOutgoing {
 					a.BytesSent += e.Bytes
 				} else {
@@ -552,14 +554,14 @@ func main() {
 	}
 
 DONE:
-	// Ensure we stop goroutines/tickers cleanly
+	// Tell background work to stop before we finish up.
 	stop()
 	flushTicker.Stop()
 	progress.Stop()
 
 	log.Printf("[*] stopping, final flush...")
 
-	// Final flush
+	// Write any flow data still waiting in memory.
 	if mode == "flow" || mode == "both" {
 		flush()
 	}
@@ -568,7 +570,7 @@ DONE:
 		_ = evW.Flush()
 	}
 
-	// Write run meta ALWAYS
+	// Always write a small summary file about this run.
 	summary := map[string]any{
 		"start_rfc3339":   startTime.UTC().Format(time.RFC3339),
 		"end_rfc3339":     time.Now().UTC().Format(time.RFC3339),
