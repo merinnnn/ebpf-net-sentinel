@@ -1,6 +1,6 @@
 ARG UBUNTU_VERSION=22.04
 
-FROM ubuntu:${UBUNTU_VERSION} AS base
+FROM ubuntu:${UBUNTU_VERSION} AS live
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
@@ -40,16 +40,9 @@ RUN python3 -m pip install --upgrade pip && python3 -m pip install -r /tmp/requi
 COPY . .
 
 RUN chmod +x docker/entrypoint.sh docker/install_live_deps.sh
+RUN /opt/netsentinel/docker/install_live_deps.sh
 
 EXPOSE 8501
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/opt/netsentinel/docker/entrypoint.sh"]
-CMD ["streamlit"]
-
-
-FROM base AS app
-
-
-FROM base AS live
-
-RUN /opt/netsentinel/docker/install_live_deps.sh
+CMD ["live-monitor"]
