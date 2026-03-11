@@ -25,14 +25,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     iproute2 \
     jq \
     procps \
-    python3 \
-    python3-pip \
-    python3-setuptools \
-    python3-venv \
-    python-is-python3 \
     software-properties-common \
     sudo \
     tini \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-venv \
+    python3.11-distutils \
+    && curl -fsSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py \
+    && python3.11 /tmp/get-pip.py \
+    && ln -sf /usr/bin/python3.11 /usr/local/bin/python3 \
+    && ln -sf /usr/bin/python3.11 /usr/local/bin/python \
+    && rm -f /tmp/get-pip.py \
     && rm -rf /var/lib/apt/lists/*
 
 COPY app/requirements.txt /tmp/requirements.txt
