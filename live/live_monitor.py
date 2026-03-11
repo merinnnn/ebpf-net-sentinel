@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import math
 import os
+import signal
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +27,7 @@ def get_repo_root() -> Path:
 
 REPO = get_repo_root()
 RUNTIME_STATE_PATH = REPO / "data" / "runtime" / "live_capture_state.json"
+DAEMON_LOG_PATH = REPO / "data" / "runtime" / "live_capture_launcher.log"
 
 st.set_page_config(
     page_title="NetSentinel · Live Monitor",
@@ -314,6 +317,101 @@ def load_runtime_state() -> dict:
     except Exception:
         return {}
 
+def append_launcher_log(line: str) -> None:
+    DAEMON_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with DAEMON_LOG_PATH.open("a", encoding="utf-8") as fh:
+        fh.write(f"{datetime.now().isoformat()} {line.rstrip()}\n")
+
+def list_interfaces() -> list[str]:
+    try:
+        out = subprocess.run(
+            ["ip", "-o", "link", "show"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return []
+    names: list[str] = []
+    for line in out.stdout.splitlines():
+        parts = line.split(":", 2)
+        if len(parts) < 2:
+            continue
+        name = parts[1].strip().split("@", 1)[0]
+        if name != "lo":
+            names.append(name)
+    return sorted(dict.fromkeys(names))
+
+def live_capture_is_running(runtime_state: dict | None) -> bool:
+    if not runtime_state:
+        return False
+    if runtime_state.get("status") != "running":
+        return False
+    pid = runtime_state.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+def start_live_capture(iface: str) -> tuple[bool, str]:
+    if not iface:
+        return False, "Choose an interface first."
+    if os.geteuid() != 0:
+        return False, "Live capture must be started as root inside the container or host."
+
+    runtime_state = load_runtime_state()
+    if live_capture_is_running(runtime_state):
+        current_iface = runtime_state.get("interface") or "unknown"
+        return False, f"Live capture is already running on {current_iface}."
+
+    cmd = [
+        "python3",
+        str(REPO / "ubuntu" / "live_capture_daemon.py"),
+        iface,
+        "--flush-secs",
+        "5",
+        "--poll-secs",
+        "3",
+        "--mode",
+        "both",
+        "--disable-kprobes",
+    ]
+    DAEMON_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    log_fh = DAEMON_LOG_PATH.open("a", encoding="utf-8")
+    append_launcher_log(f"starting live capture: {' '.join(cmd)}")
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(REPO),
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+        )
+    except Exception as exc:
+        log_fh.close()
+        append_launcher_log(f"failed to start live capture: {exc}")
+        return False, f"Failed to start live capture: {exc}"
+    log_fh.close()
+    return True, f"Live capture launch requested for {iface} (pid {proc.pid})."
+
+def stop_live_capture() -> tuple[bool, str]:
+    runtime_state = load_runtime_state()
+    pid = runtime_state.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return False, "No live capture PID found in runtime state."
+    try:
+        os.kill(pid, signal.SIGINT)
+    except ProcessLookupError:
+        return False, f"Capture process {pid} is not running."
+    except PermissionError:
+        return False, f"Permission denied stopping capture process {pid}."
+    append_launcher_log(f"sent SIGINT to live capture pid={pid}")
+    return True, f"Stop signal sent to live capture pid {pid}."
+
 def resolve_repo_path(path_str: str) -> Path:
     p = Path(path_str).expanduser()
     if p.is_absolute():
@@ -342,6 +440,33 @@ def runtime_probe_status(runtime_state: dict) -> list[str]:
         return ["warn"] * len(PROBES)
     return ["warn"] * len(PROBES)
 
+def runtime_capture_status(runtime_state: dict | None) -> tuple[str, str]:
+    status = (runtime_state or {}).get("status", "missing")
+    if status == "running":
+        return (
+            "running",
+            '<span class="ns-status-live"><span class="ns-dot-live"></span>Capture Running</span>',
+        )
+    if status == "starting":
+        return (
+            "starting",
+            '<span class="ns-status-paused"><span class="ns-dot-paused"></span>Capture Starting</span>',
+        )
+    if status == "error":
+        return (
+            "error",
+            '<span class="ns-status-paused" style="color:#ef4444;background:rgba(239,68,68,0.1);border-color:rgba(239,68,68,0.35);"><span class="ns-dot-paused" style="background:#ef4444;"></span>Capture Error</span>',
+        )
+    if status == "stopped":
+        return (
+            "stopped",
+            '<span class="ns-status-paused"><span class="ns-dot-paused"></span>Capture Stopped</span>',
+        )
+    return (
+        "missing",
+        '<span class="ns-status-paused"><span class="ns-dot-paused"></span>No Live Capture</span>',
+    )
+
 def sync_live_source_from_runtime() -> None:
     runtime_state = load_runtime_state()
     if not runtime_state:
@@ -367,12 +492,13 @@ def sync_live_source_from_runtime() -> None:
 
 def _init():
     runtime_state = load_runtime_state()
+    iface_options = list_interfaces()
     defaults = {
         "is_live":        True,
         "source":         "Live",
         "file_path":      default_live_event_path(),
         "ws_url":         "ws://localhost:8765/events",
-        "iface":          runtime_state.get("interface") or "",
+        "iface":          runtime_state.get("interface") or (iface_options[0] if iface_options else ""),
         "model":          "eBPF Enriched",
         "threshold":      0.50,
         "poll_interval":  1,
@@ -385,6 +511,7 @@ def _init():
         "file_offset":    0,
         "filter_anom":    False,
         "run_dir":        "",
+        "capture_feedback": "",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -467,11 +594,30 @@ with st.sidebar:
     )
     st.markdown("---")
 
+    runtime_state = load_runtime_state()
+    capture_running = live_capture_is_running(runtime_state)
+    iface_options = list_interfaces()
+
+    if S.capture_feedback:
+        st.info(S.capture_feedback)
+
     col_a, col_b = st.columns(2)
     with col_a:
-        if st.button("Stop" if S.is_live else "Start", use_container_width=True):
-            S.is_live = not S.is_live
+        if st.button("Start Capture", use_container_width=True, disabled=capture_running):
+            ok, msg = start_live_capture(S.iface)
+            S.capture_feedback = msg
+            st.rerun()
     with col_b:
+        if st.button("Stop Capture", use_container_width=True, disabled=not capture_running):
+            ok, msg = stop_live_capture()
+            S.capture_feedback = msg
+            st.rerun()
+
+    col_c, col_d = st.columns(2)
+    with col_c:
+        if st.button("Pause View" if S.is_live else "Resume View", use_container_width=True):
+            S.is_live = not S.is_live
+    with col_d:
         if st.button("Clear", use_container_width=True):
             S.events        = []
             S.total_flows   = 0
@@ -504,7 +650,11 @@ with st.sidebar:
         st.caption("Backend sends JSON events over WebSocket. The merged Zeek and eBPF stream is not connected here yet.")
 
     st.markdown('<p class="ns-section">Capture Config</p>', unsafe_allow_html=True)
-    S.iface     = st.text_input("Interface", value=S.iface)
+    if iface_options:
+        iface_index = iface_options.index(S.iface) if S.iface in iface_options else 0
+        S.iface = st.selectbox("Interface", iface_options, index=iface_index)
+    else:
+        S.iface = st.text_input("Interface", value=S.iface, placeholder="eth0")
     S.model     = st.selectbox("Model", ["eBPF Enriched","Baseline"],
                                 index=0 if S.model=="eBPF Enriched" else 1)
     S.threshold = st.slider("Anomaly threshold", 0.0, 1.0, S.threshold, 0.01)
@@ -545,11 +695,7 @@ if S.is_live:
 
 ingest(new_evs)
 
-status_html = (
-    f'<span class="ns-status-live"><span class="ns-dot-live"></span>Live</span>'
-    if S.is_live else
-    f'<span class="ns-status-paused"><span class="ns-dot-paused"></span>Paused</span>'
-)
+capture_state, status_html = runtime_capture_status(runtime_state if S.source == "Live" else None)
 st.markdown(
     f'<div class="ns-topbar">'
     f'<div style="display:flex;align-items:baseline;gap:14px;">'
@@ -563,6 +709,19 @@ st.markdown(
     f'</div>',
     unsafe_allow_html=True,
 )
+
+if S.source == "Live":
+    runtime_message = runtime_state.get("message") if runtime_state else None
+    runtime_event_path = runtime_state.get("ebpf_events_path") if runtime_state else None
+    if capture_state == "error":
+        st.error(runtime_message or "Live capture failed to start.")
+    elif capture_state == "missing":
+        st.warning("No live capture state found. Start `sudo bash ubuntu/run_live.sh <iface>` first.")
+    elif capture_state == "starting":
+        st.warning(runtime_message or "Live capture is starting.")
+
+    if runtime_event_path:
+        st.caption(f"Current raw event file: `{runtime_event_path}`")
 
 anom_rate = (S.total_anom / S.total_flows * 100) if S.total_flows > 0 else 0.0
 last_pps  = len(new_evs)
