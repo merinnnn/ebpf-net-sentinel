@@ -644,7 +644,7 @@ with col_main:
             yaxis=dict(title="Flows/s", gridcolor=BORDER,
                        linecolor=BORDER, tickfont=dict(size=8)),
             yaxis2=dict(title="Score", overlaying="y", side="right",
-                        range=[0, 1], gridcolor="transparent",
+                        range=[0, 1], gridcolor="rgba(0,0,0,0)",
                         tickfont=dict(size=8)),
             legend=dict(bgcolor=SURFACE, bordercolor=BORDER,
                         font=dict(size=9), x=0.01, y=0.98,
