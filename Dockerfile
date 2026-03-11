@@ -20,11 +20,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     ca-certificates \
     curl \
+    dirmngr \
     git \
     gnupg \
     iproute2 \
     jq \
     procps \
+    python3-launchpadlib \
     software-properties-common \
     sudo \
     tini \
