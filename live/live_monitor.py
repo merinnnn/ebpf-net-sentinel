@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import random
 import time
 from datetime import datetime
 from pathlib import Path
@@ -26,7 +25,6 @@ def get_repo_root() -> Path:
 
 REPO = get_repo_root()
 RUNTIME_STATE_PATH = REPO / "data" / "runtime" / "live_capture_state.json"
-DEFAULT_EVENT_PATH = REPO / "data" / "runs" / "live_mock_backend_seed42" / "ebpf_events.jsonl"
 
 st.set_page_config(
     page_title="NetSentinel · Live Monitor",
@@ -324,21 +322,57 @@ def resolve_repo_path(path_str: str) -> Path:
 
 def default_live_event_path() -> str:
     state = load_runtime_state()
+    event_path = state.get("ebpf_events_path")
+    if event_path and Path(event_path).exists():
+        return str(Path(event_path))
     run_dir = state.get("run_dir")
     if run_dir:
         candidate = Path(run_dir) / "ebpf_events.jsonl"
         if candidate.exists():
             return str(candidate)
-    return str(DEFAULT_EVENT_PATH)
+    return ""
+
+def runtime_probe_status(runtime_state: dict) -> list[str]:
+    status = runtime_state.get("status")
+    if status == "running":
+        return ["ok"] * len(PROBES)
+    if status == "error":
+        return ["err"] * len(PROBES)
+    if status == "starting":
+        return ["warn"] * len(PROBES)
+    return ["warn"] * len(PROBES)
+
+def sync_live_source_from_runtime() -> None:
+    runtime_state = load_runtime_state()
+    if not runtime_state:
+        return
+
+    runtime_iface = runtime_state.get("interface")
+    runtime_file = runtime_state.get("ebpf_events_path") or default_live_event_path()
+
+    if runtime_iface:
+        S.iface = runtime_iface
+
+    if runtime_file and S.file_path != runtime_file:
+        S.file_path = runtime_file
+        S.file_offset = 0
+        S.events = []
+        S.total_flows = 0
+        S.total_anom = 0
+        S.threat_counts = {}
+        S.pps_series = []
+        S.start_time = time.time()
+
+    S.run_dir = runtime_state.get("run_dir") or ""
 
 def _init():
     runtime_state = load_runtime_state()
     defaults = {
         "is_live":        True,
-        "source":         "Demo",
+        "source":         "Live",
         "file_path":      default_live_event_path(),
         "ws_url":         "ws://localhost:8765/events",
-        "iface":          runtime_state.get("interface") or "veth1",
+        "iface":          runtime_state.get("interface") or "",
         "model":          "eBPF Enriched",
         "threshold":      0.50,
         "poll_interval":  1,
@@ -349,7 +383,6 @@ def _init():
         "threat_counts":  {},
         "pps_series":     [],
         "file_offset":    0,
-        "probe_events":   [0]*5,
         "filter_anom":    False,
         "run_dir":        "",
     }
@@ -367,41 +400,13 @@ PROBES = [
     "socket/filter",
     "tracepoint/sys_bind",
 ]
-PROBE_STATUS = ["ok","ok","ok","ok","warn"]
-
-DEMO_IPS  = ["192.168.1.", "10.0.0.", "172.16.0."]
-DEMO_ATKS = (["BENIGN"]*7 + ["DDoS","PortScan","Brute Force","Bot","Web Attack"])
-DEMO_PRTS = ["TCP","TCP","TCP","UDP","TCP","ICMP"]
-DEMO_EXES = ["nginx","sshd","python3","curl","nc","wget","bash","tcpdump"]
-DEMO_PORTS = [80,443,22,8080,3306,21,53,8443]
-
-rng = random.Random()
-
-def demo_events(n: int) -> list[dict]:
-    out = []
-    for _ in range(n):
-        lbl = rng.choice(DEMO_ATKS)
-        is_atk = lbl != "BENIGN"
-        score = rng.uniform(0.55, 0.99) if is_atk else rng.uniform(0.01, 0.30)
-        out.append({
-            "src_ip":        rng.choice(DEMO_IPS) + str(rng.randint(1,254)),
-            "dst_ip":        rng.choice(DEMO_IPS) + str(rng.randint(1,254)),
-            "src_port":      rng.randint(1024, 65535),
-            "dst_port":      rng.choice(DEMO_PORTS),
-            "proto":         rng.choice(DEMO_PRTS),
-            "anomaly_score": round(score, 4),
-            "label":         lbl,
-            "pid":           rng.randint(1000, 30000),
-            "exe":           rng.choice(DEMO_EXES),
-            "uid":           rng.randint(0, 1000),
-            "_ts":           datetime.now().strftime("%H:%M:%S"),
-        })
-    return out
-
 def read_file_events(path: str, offset: int) -> tuple[list[dict], int]:
     p = resolve_repo_path(path)
     if not p.exists():
-        return [], offset
+        return [], 0
+    size = p.stat().st_size
+    if offset > size:
+        offset = 0
     evs = []
     with open(p, "rb") as f:
         f.seek(offset)
@@ -449,8 +454,6 @@ def ingest(evs: list[dict]):
         if lbl not in S.threat_counts:
             S.threat_counts[lbl] = 0
         S.threat_counts[lbl] += 1
-    for i in range(len(PROBES)):
-        S.probe_events[i] += rng.randint(0, max(1, len(evs)//2))
     new_rows = list(reversed(evs[-50:]))  # cap per tick
     S.events = new_rows + S.events
     S.events = S.events[:300]   # keep last 300
@@ -476,21 +479,25 @@ with st.sidebar:
             S.threat_counts = {}
             S.pps_series    = []
             S.file_offset   = 0
-            S.probe_events  = [0]*5
             S.start_time    = time.time()
 
     st.markdown('<p class="ns-section">Data Source</p>', unsafe_allow_html=True)
-    S.source = st.selectbox("Source", ["Demo", "File", "WebSocket"],
-                             index=["Demo","File","WebSocket"].index(S.source),
+    source_options = ["Live", "File", "WebSocket"]
+    current_source = S.source if S.source in source_options else "Live"
+    S.source = st.selectbox("Source", source_options,
+                             index=source_options.index(current_source),
                              label_visibility="collapsed")
 
-    if S.source == "File":
+    if S.source == "Live":
+        runtime_state = load_runtime_state()
+        live_path = runtime_state.get("ebpf_events_path") or S.file_path or "(waiting for live capture)"
+        st.caption("Following the current live capture selected in `ubuntu/run_live.sh`.")
+        st.caption(f"Live event file: `{live_path}`")
+    elif S.source == "File":
         S.file_path = st.text_input("JSONL file path", value=S.file_path,
-                                     placeholder="data/runs/live_mock_backend_seed42/ebpf_events.jsonl")
+                                     placeholder="data/runs/live_YYYY-MM-DD_HHMMSS/ebpf_events.jsonl")
         st.caption(
-            "Live run output is written under `data/runs/live_*/`. "
-            "Use `ebpf_events.jsonl` from a live run or "
-            "`data/runs/live_mock_backend_seed42/ebpf_events.jsonl`."
+            "Point this at a real capture file under `data/runs/live_*/ebpf_events.jsonl`."
         )
     elif S.source == "WebSocket":
         S.ws_url = st.text_input("WebSocket URL", value=S.ws_url)
@@ -526,11 +533,13 @@ with st.sidebar:
     )
 
 new_evs: list[dict] = []
+runtime_state = load_runtime_state()
+if S.source == "Live":
+    sync_live_source_from_runtime()
+    runtime_state = load_runtime_state()
+
 if S.is_live:
-    if S.source == "Demo":
-        n = rng.randint(2, 8)
-        new_evs = demo_events(n)
-    elif S.source == "File":
+    if S.source in {"Live", "File"} and S.file_path:
         new_evs, S.file_offset = read_file_events(S.file_path, S.file_offset)
     # WebSocket data is handled on the client side.
 
@@ -561,7 +570,7 @@ last_score = (
     sum(float(e.get("anomaly_score", 0)) for e in new_evs) / len(new_evs)
     if new_evs else 0.0
 )
-ebpf_eps  = sum(S.probe_events)
+ebpf_eps  = S.total_flows
 
 k1, k2, k3, k4, k5 = st.columns(5)
 with k1:
@@ -572,7 +581,7 @@ with k2:
               delta=f"{S.total_anom:,} anomalies")
 with k3:
     st.metric("eBPF Events",   f"{ebpf_eps:,}",
-              delta="kernel-level")
+              delta="raw event rows")
 with k4:
     st.metric("Avg Score",     f"{last_score:.3f}")
 with k5:
@@ -725,15 +734,15 @@ with col_main:
         )
 
 with col_side:
-    st.markdown('<p class="ns-section">eBPF Probes</p>', unsafe_allow_html=True)
+    st.markdown('<p class="ns-section">eBPF Attach Status</p>', unsafe_allow_html=True)
+    st.caption("Per-probe event counters are not emitted by the live daemon; only attach status is shown.")
+    probe_statuses = runtime_probe_status(runtime_state)
     probe_html = ""
-    for i, (name, status) in enumerate(zip(PROBES, PROBE_STATUS)):
-        cnt = S.probe_events[i]
+    for i, (name, status) in enumerate(zip(PROBES, probe_statuses)):
         probe_html += (
             f'<div class="probe-row">'
             f'<span class="probe-name" style="font-size:0.95rem;">{name}</span>'
             f'<div style="display:flex;align-items:center;gap:8px;">'
-            f'<span class="probe-count">{cnt:,}</span>'
             f'<span class="probe-{status}">{status.upper()}</span>'
             f'</div></div>'
         )
