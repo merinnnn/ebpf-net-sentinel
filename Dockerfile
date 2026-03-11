@@ -1,4 +1,4 @@
-ARG UBUNTU_VERSION=22.04
+ARG UBUNTU_VERSION=20.04
 
 FROM ubuntu:${UBUNTU_VERSION} AS live
 
@@ -30,6 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-setuptools \
     python3-venv \
     python-is-python3 \
+    software-properties-common \
     sudo \
     tini \
     && rm -rf /var/lib/apt/lists/*
