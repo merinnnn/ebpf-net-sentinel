@@ -10,4 +10,4 @@ env
 venv
 .venv
 node_modules
-data/runtime
+data
