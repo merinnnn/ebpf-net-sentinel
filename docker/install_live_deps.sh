@@ -10,7 +10,6 @@ apt-get update
 
 apt-get install -y --no-install-recommends \
   bpfcc-tools \
-  bpftool \
   build-essential \
   clang \
   gpg \
