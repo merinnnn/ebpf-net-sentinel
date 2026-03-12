@@ -4,47 +4,30 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
 apt-get update
-apt-get install -y --no-install-recommends software-properties-common ca-certificates curl gnupg wget
-add-apt-repository -y universe
-apt-get update
-
 apt-get install -y --no-install-recommends \
   bpftool \
-  bpfcc-tools \
-  build-essential \
+  ca-certificates \
   clang \
-  gpg \
+  curl \
+  gnupg \
+  iproute2 \
+  jq \
   libbpf-dev \
   libelf-dev \
-  llvm \
   make \
-  pkg-config \
+  procps \
   python3 \
   python3-pip \
-  python3-venv \
-  tcpdump \
-  tcpreplay \
-  tshark \
-  zlib1g-dev
+  sudo \
+  wget
 
-GO_VER="1.21.13"
-apt-get remove -y golang-go golang || true
-cd /tmp
-curl -L --fail --retry 5 --retry-delay 2 --connect-timeout 15 \
-  -o "go${GO_VER}.linux-amd64.tar.gz" \
-  "https://dl.google.com/go/go${GO_VER}.linux-amd64.tar.gz"
-rm -rf /usr/local/go
-tar -C /usr/local -xzf "go${GO_VER}.linux-amd64.tar.gz"
-rm -f "go${GO_VER}.linux-amd64.tar.gz"
-ln -sf /usr/local/go/bin/go /usr/local/bin/go
-ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
-cd /
+UBUNTU_VERSION="$(. /etc/os-release && printf '%s' "${VERSION_ID}")"
 
-curl -fsSL https://download.opensuse.org/repositories/security:zeek/xUbuntu_20.04/Release.key \
+curl -fsSL "https://download.opensuse.org/repositories/security:zeek/xUbuntu_${UBUNTU_VERSION}/Release.key" \
   | gpg --dearmor \
   > /usr/share/keyrings/security_zeek.gpg
 
-echo "deb [signed-by=/usr/share/keyrings/security_zeek.gpg] https://download.opensuse.org/repositories/security:/zeek/xUbuntu_20.04/ /" \
+echo "deb [signed-by=/usr/share/keyrings/security_zeek.gpg] https://download.opensuse.org/repositories/security:/zeek/xUbuntu_${UBUNTU_VERSION}/ /" \
   > /etc/apt/sources.list.d/security_zeek.list
 
 apt-get update
