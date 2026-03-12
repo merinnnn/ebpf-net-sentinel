@@ -29,12 +29,6 @@ REPO = get_repo_root()
 RUNTIME_STATE_PATH = REPO / "data" / "runtime" / "live_capture_state.json"
 DAEMON_LOG_PATH = REPO / "data" / "runtime" / "live_capture_launcher.log"
 
-st.set_page_config(
-    page_title="NetSentinel · Live Monitor",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
 ACCENT  = "#00d4ff"
 PURPLE  = "#7c3aed"
 GREEN   = "#10b981"
@@ -71,7 +65,7 @@ st.markdown("""
   --green:   #10b981; --orange:  #f59e0b; --red: #ef4444;
 }
 
-html, body, [class*="css"] {
+html, body {
   font-family: 'JetBrains Mono', 'Courier New', monospace !important;
   background: var(--bg) !important;
   color: var(--text) !important;
@@ -92,7 +86,24 @@ html, body, [class*="css"] {
   background: var(--surface) !important;
   border-right: 1px solid var(--border) !important;
 }
-[data-testid="stSidebar"] * { font-family: 'JetBrains Mono', monospace !important; }
+[data-testid="stSidebar"] button,
+[data-testid="stSidebar"] input,
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] select,
+[data-testid="stSidebar"] textarea,
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] span,
+[data-testid="stSidebar"] div {
+  font-family: 'JetBrains Mono', monospace !important;
+}
+
+.material-symbols-rounded,
+.material-icons,
+[data-testid="stSidebarNavCollapseButton"] span,
+[data-testid="collapsedControl"] span,
+button[kind="header"] span {
+  font-family: inherit !important;
+}
 
 /* Metric cards */
 [data-testid="metric-container"] {
@@ -342,6 +353,26 @@ def list_interfaces() -> list[str]:
             names.append(name)
     return sorted(dict.fromkeys(names))
 
+def rank_interface(name: str) -> tuple[int, str]:
+    lowered = name.lower()
+    if lowered == "lo":
+        return (100, name)
+    if lowered.startswith(("eno", "enp", "ens", "eth", "wlan", "wlp")):
+        return (0, name)
+    if lowered.startswith(("tailscale", "tun", "tap")):
+        return (20, name)
+    if lowered.startswith(("docker", "br-", "veth", "virbr")):
+        return (50, name)
+    return (10, name)
+
+def preferred_interface(names: list[str]) -> str:
+    if not names:
+        return ""
+    default_iface = os.environ.get("NETSENTINEL_DEFAULT_IFACE", "").strip()
+    if default_iface and default_iface in names:
+        return default_iface
+    return sorted(names, key=rank_interface)[0]
+
 def live_capture_is_running(runtime_state: dict | None) -> bool:
     if not runtime_state:
         return False
@@ -411,6 +442,32 @@ def stop_live_capture() -> tuple[bool, str]:
         return False, f"Permission denied stopping capture process {pid}."
     append_launcher_log(f"sent SIGINT to live capture pid={pid}")
     return True, f"Stop signal sent to live capture pid {pid}."
+
+def maybe_autostart_live_capture() -> None:
+    if not os.environ.get("NETSENTINEL_AUTOSTART_LIVE_CAPTURE", "true").lower() in {"1", "true", "yes", "on"}:
+        return
+    if st.session_state.get("autostart_attempted"):
+        return
+    if st.session_state.get("source") != "Live":
+        return
+
+    runtime_state = load_runtime_state()
+    if live_capture_is_running(runtime_state):
+        st.session_state["autostart_attempted"] = True
+        return
+
+    iface = st.session_state.get("iface", "").strip()
+    if not iface:
+        iface = preferred_interface(list_interfaces())
+        st.session_state["iface"] = iface
+    if not iface:
+        return
+
+    ok, msg = start_live_capture(iface)
+    st.session_state["capture_feedback"] = msg
+    st.session_state["autostart_attempted"] = True
+    if ok:
+        st.rerun()
 
 def resolve_repo_path(path_str: str) -> Path:
     p = Path(path_str).expanduser()
@@ -498,7 +555,7 @@ def _init():
         "source":         "Live",
         "file_path":      default_live_event_path(),
         "ws_url":         "ws://localhost:8765/events",
-        "iface":          runtime_state.get("interface") or (iface_options[0] if iface_options else ""),
+        "iface":          runtime_state.get("interface") or preferred_interface(iface_options),
         "model":          "eBPF Enriched",
         "threshold":      0.50,
         "poll_interval":  1,
@@ -512,6 +569,7 @@ def _init():
         "filter_anom":    False,
         "run_dir":        "",
         "capture_feedback": "",
+        "autostart_attempted": False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -519,6 +577,7 @@ def _init():
 
 _init()
 S = st.session_state
+maybe_autostart_live_capture()
 
 PROBES = [
     "kprobe/tcp_connect",
@@ -652,7 +711,10 @@ with st.sidebar:
     st.markdown('<p class="ns-section">Capture Config</p>', unsafe_allow_html=True)
     if iface_options:
         iface_index = iface_options.index(S.iface) if S.iface in iface_options else 0
-        S.iface = st.selectbox("Interface", iface_options, index=iface_index)
+        selected_iface = st.selectbox("Interface", iface_options, index=iface_index)
+        if selected_iface != S.iface:
+            S.iface = selected_iface
+            S.autostart_attempted = False
     else:
         S.iface = st.text_input("Interface", value=S.iface, placeholder="eth0")
     S.model     = st.selectbox("Model", ["eBPF Enriched","Baseline"],
@@ -975,6 +1037,15 @@ with col_side:
         unsafe_allow_html=True,
     )
 
+should_refresh = False
 if S.is_live:
+    if S.source == "Live":
+        should_refresh = capture_state == "running" and bool(S.file_path)
+    elif S.source == "File":
+        should_refresh = bool(S.file_path)
+    elif S.source == "WebSocket":
+        should_refresh = False
+
+if should_refresh:
     time.sleep(S.poll_interval)
     st.rerun()
