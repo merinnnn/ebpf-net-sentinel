@@ -1,20 +1,20 @@
 services:
-  netsentinel-live:
+  live-monitor-app:
     build:
       context: .
-      target: live
-    image: netsentinel:live
-    container_name: netsentinel-live
+      target: live_monitor_app
+    image: live-monitor-app:latest
+    container_name: live-monitor-app
     privileged: true
     pid: host
-    ports:
-      - "8501:8501"
+    network_mode: host
     environment:
       NETSENTINEL_REPO_ROOT: /opt/netsentinel
       NETSENTINEL_DATA_DIR: /opt/netsentinel/data
       NETSENTINEL_APP_CACHE_DIR: /opt/netsentinel/data/app
       NETSENTINEL_DISABLE_EXTERNAL_FONTS: "true"
       NETSENTINEL_GENERATE_MOCK_LIVE_RUN: "false"
+      NETSENTINEL_AUTOSTART_LIVE_CAPTURE: "true"
       PORT: "8501"
     volumes:
       - ./data:/opt/netsentinel/data

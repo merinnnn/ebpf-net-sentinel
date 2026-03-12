@@ -16,11 +16,11 @@ export PYTHONDONTWRITEBYTECODE=1
 mkdir -p "${DATA_DIR}" "${APP_CACHE_DIR}"
 
 run_live_monitor() {
-  exec streamlit run live/live_monitor.py --server.address="${HOST}" --server.port="${PORT}"
+  exec streamlit run app/app.py --server.address="${HOST}" --server.port="${PORT}"
 }
 
-case "${1:-live-monitor}" in
-  live-monitor)
+case "${1:-live-monitor-app}" in
+  live-monitor-app|live-monitor)
     shift || true
     run_live_monitor "$@"
     ;;
