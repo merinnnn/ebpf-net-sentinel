@@ -137,6 +137,11 @@ Inside that folder you should see (names may vary slightly):
 ### 3) Live capture: Zeek + netmon on a real interface
 
 **What it does**: starts Zeek and the eBPF collector on a real interface until you press **Ctrl+C**.
+While it is running, it continuously refreshes:
+
+* `zeek/conn.csv` (live Zeek flow output)
+* `merged.csv` (live Zeek + eBPF flow output)
+* `data/runtime/live_capture_state.json` (current run + file paths for the web app)
 
 ```bash
 sudo bash ubuntu/run_live.sh <IFACE>
@@ -147,6 +152,8 @@ sudo bash ubuntu/run_live.sh <IFACE>
 * A run folder printed at start (e.g. `data/runs/live_YYYY-MM-DD_HHMMSS`)
 * `netmon.log` should show periodic `progress:` lines
 * Zeek logs written under `zeek/`
+* `zeek/conn.csv` should appear during capture
+* `merged.csv` should appear during capture once both Zeek and eBPF data exist
 
 ---
 
