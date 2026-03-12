@@ -1,16 +1,16 @@
 {
   "mode": "standalone_live_netmon_sampling",
   "netmon_overhead": {
-    "pid": 89053,
+    "pid": 263554,
     "samples": 60,
-    "cpu_percent_mean": 0.18333333333333332,
-    "cpu_percent_p95": 1.0,
-    "rss_mb_mean": 49.540104166666666,
-    "rss_mb_p95": 49.7734375,
+    "cpu_percent_mean": 0.2833333333333333,
+    "cpu_percent_p95": 2.0,
+    "rss_mb_mean": 50.40859375,
+    "rss_mb_p95": 50.49609375,
     "csv": "/home/merin/projects/ebpf-net-sentinel/data/reports/overheads/netmon_live_run1_samples_seed42.csv",
     "duration_s": 60,
     "interval_s": 1.0,
-    "timestamp_utc": "2026-03-04T12:13:49Z",
+    "timestamp_utc": "2026-03-12T19:42:43Z",
     "platform": "Linux-5.15.0-139-generic-x86_64-with-glibc2.29"
   }
 }
