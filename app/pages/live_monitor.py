@@ -662,22 +662,22 @@ with st.sidebar:
 
     col_a, col_b = st.columns(2)
     with col_a:
-        if st.button("Start Capture", use_container_width=True, disabled=capture_running):
+        if st.button("Start Capture", width="stretch", disabled=capture_running):
             ok, msg = start_live_capture(S.iface)
             S.capture_feedback = msg
             st.rerun()
     with col_b:
-        if st.button("Stop Capture", use_container_width=True, disabled=not capture_running):
+        if st.button("Stop Capture", width="stretch", disabled=not capture_running):
             ok, msg = stop_live_capture()
             S.capture_feedback = msg
             st.rerun()
 
     col_c, col_d = st.columns(2)
     with col_c:
-        if st.button("Pause View" if S.is_live else "Resume View", use_container_width=True):
+        if st.button("Pause View" if S.is_live else "Resume View", width="stretch"):
             S.is_live = not S.is_live
     with col_d:
-        if st.button("Clear", use_container_width=True):
+        if st.button("Clear", width="stretch"):
             S.events        = []
             S.total_flows   = 0
             S.total_anom    = 0
@@ -881,7 +881,7 @@ with col_main:
                         orientation="h"),
             hovermode="x unified",
         )
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
     elif not HAS_PLOTLY:
         st.info("Install plotly for the time-series chart:  pip install plotly")
     else:
@@ -989,7 +989,7 @@ with col_side:
                 margin=dict(l=10, r=10, t=10, b=10),
                 height=160,
             )
-            st.plotly_chart(fig2, use_container_width=True,
+            st.plotly_chart(fig2, width="stretch",
                             config={"displayModeBar": False})
 
         for _, row in df_th.head(6).iterrows():
