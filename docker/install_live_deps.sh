@@ -5,7 +5,6 @@ export DEBIAN_FRONTEND=noninteractive
 
 apt-get update
 apt-get install -y --no-install-recommends \
-  bpftool \
   ca-certificates \
   clang \
   curl \
@@ -20,6 +19,30 @@ apt-get install -y --no-install-recommends \
   python3-pip \
   sudo \
   wget
+
+if ! apt-get install -y --no-install-recommends bpftool; then
+  BPFT_PROVIDER="$(
+    apt-cache search '^linux-.*tools-common$' \
+      | awk '{print $1}' \
+      | grep -E '^linux-(hwe|lowlatency-hwe|nvidia)-' \
+      | sort -Vr \
+      | head -n 1
+  )"
+  if [[ -z "${BPFT_PROVIDER}" ]]; then
+    BPFT_PROVIDER="$(apt-cache search '^linux-.*tools-common$' | awk '/tools-common/ {print $1; exit}')"
+  fi
+  if [[ -z "${BPFT_PROVIDER}" ]]; then
+    echo "could not find a bpftool provider package" >&2
+    exit 1
+  fi
+  apt-get install -y --no-install-recommends "${BPFT_PROVIDER}"
+  BPFT_BIN="$(find /usr/lib -type f -name bpftool | head -n 1)"
+  if [[ -z "${BPFT_BIN}" ]]; then
+    echo "bpftool binary not found after installing ${BPFT_PROVIDER}" >&2
+    exit 1
+  fi
+  ln -sf "${BPFT_BIN}" /usr/local/bin/bpftool
+fi
 
 UBUNTU_VERSION="$(. /etc/os-release && printf '%s' "${VERSION_ID}")"
 
