@@ -4,53 +4,48 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
 apt-get update
+apt-get install -y --no-install-recommends software-properties-common ca-certificates curl gnupg wget
+add-apt-repository -y universe
+apt-get update
+
 apt-get install -y --no-install-recommends \
-  ca-certificates \
+  bpfcc-tools \
+  bpftool \
+  build-essential \
   clang \
-  curl \
-  gnupg \
-  iproute2 \
-  jq \
+  gpg \
   libbpf-dev \
   libelf-dev \
+  llvm \
   make \
-  procps \
+  pkg-config \
   python3 \
   python3-pip \
+  python3-venv \
+  tcpdump \
+  tcpreplay \
+  tshark \
   sudo \
-  wget
+  zlib1g-dev
 
-if ! apt-get install -y --no-install-recommends bpftool; then
-  BPFT_PROVIDER="$(
-    apt-cache search '^linux-.*tools-common$' \
-      | awk '{print $1}' \
-      | grep -E '^linux-(hwe|lowlatency-hwe|nvidia)-' \
-      | sort -Vr \
-      | head -n 1
-  )"
-  if [[ -z "${BPFT_PROVIDER}" ]]; then
-    BPFT_PROVIDER="$(apt-cache search '^linux-.*tools-common$' | awk '/tools-common/ {print $1; exit}')"
-  fi
-  if [[ -z "${BPFT_PROVIDER}" ]]; then
-    echo "could not find a bpftool provider package" >&2
-    exit 1
-  fi
-  apt-get install -y --no-install-recommends "${BPFT_PROVIDER}"
-  BPFT_BIN="$(find /usr/lib -type f -name bpftool | head -n 1)"
-  if [[ -z "${BPFT_BIN}" ]]; then
-    echo "bpftool binary not found after installing ${BPFT_PROVIDER}" >&2
-    exit 1
-  fi
-  ln -sf "${BPFT_BIN}" /usr/local/bin/bpftool
-fi
+GO_VER="1.21.13"
+apt-get remove -y golang-go golang || true
+cd /tmp
+curl -L --fail --retry 5 --retry-delay 2 --connect-timeout 15 \
+  -o "go${GO_VER}.linux-amd64.tar.gz" \
+  "https://dl.google.com/go/go${GO_VER}.linux-amd64.tar.gz"
+rm -rf /usr/local/go
+tar -C /usr/local -xzf "go${GO_VER}.linux-amd64.tar.gz"
+rm -f "go${GO_VER}.linux-amd64.tar.gz"
+ln -sf /usr/local/go/bin/go /usr/local/bin/go
+ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+cd /
 
-UBUNTU_VERSION="$(. /etc/os-release && printf '%s' "${VERSION_ID}")"
-
-curl -fsSL "https://download.opensuse.org/repositories/security:zeek/xUbuntu_${UBUNTU_VERSION}/Release.key" \
+curl -fsSL https://download.opensuse.org/repositories/security:zeek/xUbuntu_20.04/Release.key \
   | gpg --dearmor \
   > /usr/share/keyrings/security_zeek.gpg
 
-echo "deb [signed-by=/usr/share/keyrings/security_zeek.gpg] https://download.opensuse.org/repositories/security:/zeek/xUbuntu_${UBUNTU_VERSION}/ /" \
+echo "deb [signed-by=/usr/share/keyrings/security_zeek.gpg] https://download.opensuse.org/repositories/security:/zeek/xUbuntu_20.04/ /" \
   > /etc/apt/sources.list.d/security_zeek.list
 
 apt-get update
