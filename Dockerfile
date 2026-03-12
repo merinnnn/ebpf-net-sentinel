@@ -5,10 +5,8 @@ FROM golang:${GO_VERSION}-bookworm AS netmon_builder
 
 WORKDIR /src/ebpf_core/cmd/netmon
 
-COPY ebpf_core/cmd/netmon/go.mod ./
-RUN go mod download
-
-COPY ebpf_core/cmd/netmon/main.go ./
+COPY ebpf_core/cmd/netmon/ ./
+RUN go mod tidy
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/netmon .
 
 FROM ubuntu:${UBUNTU_VERSION} AS live_monitor_app
