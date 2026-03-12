@@ -159,8 +159,32 @@ class LiveCaptureDaemon:
         write_json_atomic(STATE_PATH, payload)
 
     def build_netmon(self) -> tuple[Path, Path]:
-        info("Building ebpf_core")
-        res = run_sync(["make", "-C", str(REPO / "ebpf_core")], self.paths.netmon_log)
+        bin_path = REPO / "ebpf_core" / "bin" / "netmon"
+        obj_path = REPO / "ebpf_core" / "bin" / "netmon.bpf.o"
+        if not bin_path.exists():
+            legacy = REPO / "ebpf_core" / "netmon"
+            if legacy.exists():
+                bin_path = legacy
+        if not obj_path.exists():
+            legacy = REPO / "ebpf_core" / "netmon.bpf.o"
+            if legacy.exists():
+                obj_path = legacy
+
+        if bin_path.exists() and obj_path.exists():
+            info("Using prebuilt ebpf_core artifacts")
+            return bin_path, obj_path
+
+        if bin_path.exists():
+            info("Building ebpf_core BPF object")
+            cmd = ["make", "-C", str(REPO / "ebpf_core"), "netmon.bpf.o"]
+        elif obj_path.exists():
+            info("Building ebpf_core userspace binary")
+            cmd = ["make", "-C", str(REPO / "ebpf_core"), "netmon"]
+        else:
+            info("Building ebpf_core")
+            cmd = ["make", "-C", str(REPO / "ebpf_core")]
+
+        res = run_sync(cmd, self.paths.netmon_log)
         if res.returncode != 0:
             raise RuntimeError("failed to build ebpf_core; check netmon.log")
 
