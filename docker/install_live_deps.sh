@@ -9,6 +9,7 @@ add-apt-repository -y universe
 apt-get update
 
 apt-get install -y --no-install-recommends \
+  bpftool \
   bpfcc-tools \
   build-essential \
   clang \
