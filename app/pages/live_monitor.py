@@ -586,6 +586,45 @@ PROBES = [
     "socket/filter",
     "tracepoint/sys_bind",
 ]
+
+PROTO_MAP = {
+    1: "ICMP",
+    6: "TCP",
+    17: "UDP",
+}
+
+def normalise_event(ev: dict) -> dict:
+    out = dict(ev)
+
+    ts_s = out.get("ts_s")
+    if "_ts" not in out:
+        try:
+            out["_ts"] = datetime.fromtimestamp(float(ts_s)).strftime("%H:%M:%S")
+        except Exception:
+            out["_ts"] = datetime.now().strftime("%H:%M:%S")
+
+    if "src_ip" not in out:
+        out["src_ip"] = out.get("saddr_str") or out.get("saddr") or "?"
+    if "dst_ip" not in out:
+        out["dst_ip"] = out.get("daddr_str") or out.get("daddr") or "?"
+    if "src_port" not in out:
+        out["src_port"] = out.get("sport", "?")
+    if "dst_port" not in out:
+        out["dst_port"] = out.get("dport", "?")
+    if "exe" not in out:
+        out["exe"] = out.get("comm", "") or out.get("comm_mode", "")
+
+    proto = out.get("proto")
+    if isinstance(proto, (int, float)):
+        out["proto"] = PROTO_MAP.get(int(proto), str(int(proto)))
+    else:
+        try:
+            out["proto"] = PROTO_MAP.get(int(str(proto)), str(proto).upper())
+        except Exception:
+            out["proto"] = str(proto or "TCP").upper()
+
+    return out
+
 def read_file_events(path: str, offset: int) -> tuple[list[dict], int]:
     p = resolve_repo_path(path)
     if not p.exists():
@@ -603,8 +642,7 @@ def read_file_events(path: str, offset: int) -> tuple[list[dict], int]:
         if not line:
             continue
         try:
-            ev = json.loads(line)
-            ev.setdefault("_ts", datetime.now().strftime("%H:%M:%S"))
+            ev = normalize_event(json.loads(line))
             evs.append(ev)
         except Exception:
             pass
