@@ -45,6 +45,9 @@ COPY app/requirements.txt /tmp/requirements.txt
 RUN python3 -m pip install --upgrade pip && python3 -m pip install -r /tmp/requirements.txt
 
 COPY . .
+RUN mkdir -p /opt/netsentinel/data/models
+COPY data/models/baseline_headline_model_seed42.joblib /opt/netsentinel/data/models/
+COPY data/models/ebpf_headline_model_seed42.joblib /opt/netsentinel/data/models/
 
 RUN chmod +x docker/entrypoint.sh docker/install_live_deps.sh
 RUN /opt/netsentinel/docker/install_live_deps.sh
