@@ -1,8 +1,8 @@
 feature,importance_mean,importance_std,importance_mean_clip,cumulative_importance_share,feature_origin,permutation_rank,shap_rank,mean_rank
-ebpf_samples,0.010513595068661,0.0018421680469299,0.010513595068661,0.998039760045607,ebpf-derived,1,1,1.0
-ebpf_bytes_recv,0.0,0.0,0.0,1.0,ebpf-derived,5,3,4.0
-ebpf_retransmits,0.0,0.0,0.0,1.0,ebpf-derived,4,4,4.0
-ebpf_pid,0.0,0.0,0.0,1.0,ebpf-derived,2,6,4.0
-ebpf_state_changes,0.0,0.0,0.0,1.0,ebpf-derived,3,5,4.0
-ebpf_bytes_sent,-0.0410306110922851,0.0009460169812034,0.0,1.0,ebpf-derived,7,2,4.5
-ebpf_uid,0.0,0.0,0.0,1.0,ebpf-derived,6,7,6.5
+ebpf_bytes_sent,0.0144371076793983,0.0018804034586025,0.0144371076793983,0.986589941782354,ebpf-derived,1,2,1.5
+ebpf_samples,0.0074808216746542,0.0019894220399892,0.0074808216746542,1.0,ebpf-derived,2,1,1.5
+ebpf_retransmits,0.0,0.0,0.0,1.0,ebpf-derived,3,4,3.5
+ebpf_bytes_recv,0.0,0.0,0.0,1.0,ebpf-derived,4,3,3.5
+ebpf_pid,0.0,0.0,0.0,1.0,ebpf-derived,5,6,5.5
+ebpf_state_changes,0.0,0.0,0.0,1.0,ebpf-derived,6,5,5.5
+ebpf_uid,0.0,0.0,0.0,1.0,ebpf-derived,7,7,7.0
