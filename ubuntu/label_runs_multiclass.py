@@ -378,14 +378,43 @@ def label_run_chunked(
     chunksize: int,
     auto_halfday_shift: bool,
     shift_sample_rows: int,
+    day_override: Optional[str] = None,
 ) -> str:
     run_dir = run_dir.rstrip("/")
     merged_csv = os.path.join(run_dir, "merged.csv")
     meta = read_run_meta(run_dir)
-    day = norm_day_from_path(meta.get("pcap", ""))
+    day = day_override if day_override else norm_day_from_path(meta.get("pcap", ""))
 
     if day == "Unknown":
-        raise ValueError(f"Could not infer day from run_meta.json pcap={meta.get('pcap')}")
+        # Fallback 1: scan run directory for any *.pcap file (e.g. Monday-WorkingHours-fixed.pcap)
+        for pcap_file in glob.glob(os.path.join(run_dir, "*.pcap")):
+            day = norm_day_from_path(pcap_file)
+            if day != "Unknown":
+                print(f"[*] Inferred day={day} from pcap file in run dir: {os.path.basename(pcap_file)}")
+                break
+
+    if day == "Unknown":
+        # Fallback 2: scan run directory debug log for the PCAP path
+        for log_file in glob.glob(os.path.join(run_dir, "*.log")):
+            try:
+                with open(log_file, "r", errors="replace") as fh:
+                    for line in fh:
+                        d = norm_day_from_path(line)
+                        if d != "Unknown":
+                            day = d
+                            print(f"[*] Inferred day={day} from log file: {os.path.basename(log_file)}")
+                            break
+            except OSError:
+                pass
+            if day != "Unknown":
+                break
+
+    if day == "Unknown":
+        raise ValueError(
+            f"Could not infer day from run_meta.json (pcap={meta.get('pcap')}), "
+            f"*.pcap files, or log files in {run_dir}. "
+            f"Pass --day <Monday|Tuesday|Wednesday|Thursday|Friday> to override."
+        )
 
     lab_any = load_labels_for_day(labels_dir, day)
 
@@ -552,6 +581,7 @@ def main():
 
     ap.add_argument("--auto_halfday_shift", action="store_true", help="try shifts {0,±12h} to improve alignment")
     ap.add_argument("--shift_sample_rows", type=int, default=200000, help="rows to sample from merged.csv when choosing halfday shift")
+    ap.add_argument("--day", default=None, choices=DAYS, help="override day inference (useful when run_meta.json lacks a pcap field)")
 
     args = ap.parse_args()
 
@@ -572,6 +602,7 @@ def main():
                 chunksize=args.chunksize,
                 auto_halfday_shift=args.auto_halfday_shift,
                 shift_sample_rows=args.shift_sample_rows,
+                day_override=args.day,
             )
         )
 
