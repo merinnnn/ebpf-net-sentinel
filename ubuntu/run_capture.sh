@@ -13,7 +13,7 @@ set -euo pipefail
 # Optional env:
 #   REPLAY_IFACE=<iface>     # where tcpreplay sends packets (default: IFACE_CAPTURE)
 #   FLUSH_SECS=5             # netmon flush period seconds (default: 5)
-#   DISABLE_KPROBES=1        # default: 1 (use tracepoints only)
+#   DISABLE_KPROBES=0        # default: 0 (kprobes enabled; set to 1 for XDP/TC-only mode)
 #   MODE=flow                # flow|events|both (default: flow)
 #   SET_MTU=9000             # optional: set MTU for IFACE_CAPTURE and REPLAY_IFACE before replay
 #   FORCE_BUILD=0            # set to 1 to force rebuild netmon + BPF object (make clean all)
@@ -49,7 +49,7 @@ fi
 REPLAY_IFACE="${REPLAY_IFACE:-$IFACE_CAPTURE}"
 FLUSH_SECS="${FLUSH_SECS:-5}"
 MODE="${MODE:-flow}"
-DISABLE_KPROBES="${DISABLE_KPROBES:-1}"
+DISABLE_KPROBES="${DISABLE_KPROBES:-0}"
 SET_MTU="${SET_MTU:-}"
 FORCE_BUILD="${FORCE_BUILD:-0}"
 PRECHECK_IFACES="${PRECHECK_IFACES:-1}"
