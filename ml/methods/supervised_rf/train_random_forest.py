@@ -138,16 +138,16 @@ def main():
     print_split_summary("val", len(X_val_raw), int((y_val == 1).sum()))
     print_split_summary("test", len(X_test_raw), int((y_test == 1).sum()))
 
-    # Preprocessing: median imputation fitted on TRAIN only
+    # Fit the imputer on the training split only, then reuse it everywhere else.
     imputer = SimpleImputer(strategy="median")
     X_train = imputer.fit_transform(X_train_raw)
-    X_val   = imputer.transform(X_val_raw)    # transform only — no leakage
-    X_test  = imputer.transform(X_test_raw)   # transform only — no leakage
+    X_val   = imputer.transform(X_val_raw)
+    X_test  = imputer.transform(X_test_raw)
     feature_names = X_train_raw.columns.tolist()
     print_preprocessing_summary("SimpleImputer(median) fitted on train only; no scaling for RF")
     print_feature_summary(feature_names)
 
-    # Train
+    # Train the Random Forest on the prepared training matrix.
     print("[*] Training")
     t0 = time.time()
     rf = RandomForestClassifier(
@@ -165,7 +165,7 @@ def main():
     y_test_prob = rf.predict_proba(X_test)[:, 1]
     y_train_prob = rf.predict_proba(X_train)[:, 1]
 
-    # Threshold tuning on validation
+    # Pick the decision threshold from the validation split.
     n_pos_val = int((y_val == 1).sum())
     if n_pos_val >= 10:
         best_thr, best_val_f1 = tune_threshold_on_val(y_val.to_numpy(), y_val_prob)
@@ -223,7 +223,7 @@ def main():
             'n_jobs': args.n_jobs,
             'class_weight': 'balanced' if args.balance_classes else None,
         },
-        'preprocessing': 'SimpleImputer(median) on train only — no StandardScaler (not needed for RF)',
+        'preprocessing': 'SimpleImputer(median) on train only; no StandardScaler needed for RF',
         'tuned_threshold': best_thr,
         'training_time_seconds': float(train_time),
         'features': feature_names,
