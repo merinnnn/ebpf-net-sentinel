@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Shared helpers for notebook model training and evaluation."""
 
-from __future__ import annotations
-
+import gc
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -48,10 +47,14 @@ class PreparedSplit:
     labels: pd.Series
     features: List[str]
 
-def load_split(splits_dir: Path, test_file: str = "test.parquet") -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    train = pd.read_parquet(splits_dir / "train.parquet")
-    val = pd.read_parquet(splits_dir / "val.parquet")
-    test = pd.read_parquet(splits_dir / test_file)
+def load_split(
+    splits_dir: Path,
+    test_file: str = "test.parquet",
+    columns: List[str] | None = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    train = pd.read_parquet(splits_dir / "train.parquet", columns=columns)
+    val = pd.read_parquet(splits_dir / "val.parquet", columns=columns)
+    test = pd.read_parquet(splits_dir / test_file, columns=columns)
     return train, val, test
 
 def prepare_split(df: pd.DataFrame, feature_list: List[str] | None = None) -> PreparedSplit:
@@ -59,7 +62,7 @@ def prepare_split(df: pd.DataFrame, feature_list: List[str] | None = None) -> Pr
     num_cols = [c for c in X.columns if pd.api.types.is_numeric_dtype(X[c]) and not X[c].isna().all()]
     if feature_list is not None:
         num_cols = [c for c in feature_list if c in X.columns and pd.api.types.is_numeric_dtype(X[c])]
-    X = X[num_cols]
+    X = X[num_cols].astype(np.float32, copy=False)
     y = (df["is_attack"] == 1).astype(int).to_numpy()
     labels = df["label_family"].astype(str)
     return PreparedSplit(X=X, y=y, labels=labels, features=num_cols)
@@ -418,10 +421,15 @@ def fit_model_family_on_split(
     target_fpr: float = 0.001,
     target_recall: float | None = None,
 ) -> Dict[str, object]:
-    train_df, val_df, test_df = load_split(split_dir, test_file=test_file)
+    load_cols = None
+    if feature_list is not None:
+        load_cols = list(dict.fromkeys(["label_family", "is_attack", *feature_list]))
+    train_df, val_df, test_df = load_split(split_dir, test_file=test_file, columns=load_cols)
     tr = prepare_split(train_df, feature_list=feature_list)
     va = prepare_split(val_df, feature_list=feature_list)
     te = prepare_split(test_df, feature_list=feature_list)
+    del train_df, val_df, test_df
+    gc.collect()
 
     features = tr.features if feature_list is None else list(feature_list)
     Xtr = align_to_features(tr.X, features)
@@ -439,11 +447,15 @@ def fit_model_family_on_split(
         target_fpr=target_fpr,
         target_recall=target_recall,
     )
+    del Xtr, Xva
+    gc.collect()
 
     te_prob = _predict_scores(res["model"], Xte)
     thr = float(res["tuned_threshold"])
     te_pred = (te_prob >= thr).astype(int)
     te_metrics = binary_metrics(te.y, te_pred, te_prob)
+    del Xte
+    gc.collect()
 
     return {
         "model": res["model"],
