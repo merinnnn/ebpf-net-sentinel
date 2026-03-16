@@ -76,10 +76,17 @@ EBPF_HINTS = (
 DROP_ALWAYS = {LABEL_COL, DAY_COL}
 
 def looks_like_ebpf(col: str) -> bool:
+    """Heuristic used to classify a source column as eBPF-derived."""
     c = col.lower()
     return any(h in c for h in EBPF_HINTS)
 
 def select_feature_columns(columns: List[str]) -> Tuple[List[str], List[str], List[str]]:
+    """
+    Split the source schema into baseline columns and eBPF-specific columns.
+
+    The baseline output keeps every non-eBPF feature except the explicit label/day
+    columns. The enhanced output appends the detected eBPF columns to that baseline.
+    """
     baseline = []
     ebpf_cols = []
     for c in columns:
@@ -97,9 +104,17 @@ def _encode_categorical_ebpf(df: pd.DataFrame, ebpf_cols: list,
                               fit: bool = False) -> tuple:
     """
     Encode string/categorical eBPF columns (e.g. comm/exe) using frequency
-    encoding (count of each category in the training set, normalised to [0,1]).
+    encoding (normalised count per category).
 
-    This preserves process-context signal without exploding dimensionality.
+    NOTE ON LEAKAGE: When called with fit=True during build_datasets(), the
+    freq_maps are computed from whichever rows are in the current batch of the
+    *full* dataset, not from training rows only. This means the encoded values
+    for Friday test rows may reflect Friday-specific process-name frequencies,
+    introducing subtle leakage into the eBPF categorical features.
+
+    To avoid this, use make_train_aligned_encoding() to compute freq_maps from
+    a training-split parquet only, then pass them here via freq_maps=.
+    See NB04 Experiment 4 for the ablation that tests this correction.
     """
     cat_cols = [c for c in ebpf_cols if c in df.columns
                 and not pd.api.types.is_numeric_dtype(df[c])]
@@ -120,7 +135,51 @@ def _encode_categorical_ebpf(df: pd.DataFrame, ebpf_cols: list,
     return df, freq_maps or {}
 
 
+def make_train_aligned_encoding(
+    train_parquet_path: str,
+    ebpf_cols: list,
+    batch_size: int = 131072,
+) -> dict:
+    """
+    Compute frequency maps for categorical eBPF columns using ONLY the rows in
+    a training-split parquet. Use this instead of the global encoding baked into
+    build_datasets() to avoid train/test leakage.
+
+    Returns a dict {col_name: {category: normalised_freq}} suitable for passing
+    to _encode_categorical_ebpf(..., freq_maps=result, fit=False).
+
+    Usage in notebooks::
+
+        from ml.data_prep.make_datasets import make_train_aligned_encoding
+        train_only_maps = make_train_aligned_encoding(
+            SPLITS_4_EBPF / 'train.parquet', ebpf_cols=['ebpf_comm']
+        )
+        train_df['ebpf_comm'], _ = _encode_categorical_ebpf(
+            train_df, ['ebpf_comm'], freq_maps=train_only_maps, fit=False
+        )
+    """
+    from collections import Counter
+    counters: dict = {}
+    for df in _iter_batches(str(train_parquet_path), batch_size, columns=ebpf_cols):
+        for c in ebpf_cols:
+            if c not in df.columns:
+                continue
+            if pd.api.types.is_numeric_dtype(df[c]):
+                continue
+            if c not in counters:
+                counters[c] = Counter()
+            counters[c].update(df[c].astype(str).dropna())
+
+    freq_maps = {}
+    for c, ctr in counters.items():
+        total = sum(ctr.values())
+        if total > 0:
+            freq_maps[c] = {k: v / total for k, v in ctr.items()}
+    return freq_maps
+
+
 def _iter_batches(parquet_path: str, batch_size: int, columns=None):
+    """Yield pandas DataFrames from the input parquet in fixed-size batches."""
     pf = pq.ParquetFile(parquet_path)
     for batch in pf.iter_batches(batch_size=batch_size, columns=columns):
         yield batch.to_pandas()
@@ -142,10 +201,12 @@ def build_datasets(
     Returns the report metadata dict written to report_dir.
     """
 
+    # Create output directories up front so later writer construction is simple.
     os.makedirs(os.path.dirname(out_baseline), exist_ok=True)
     os.makedirs(os.path.dirname(out_enhanced), exist_ok=True)
     os.makedirs(report_dir, exist_ok=True)
 
+    # Inspect the source schema once so all later column choices are deterministic.
     pf = pq.ParquetFile(in_parquet)
     schema = pf.schema_arrow
     cols = [f.name for f in schema]
@@ -156,7 +217,7 @@ def build_datasets(
 
     baseline_cols, enhanced_cols, ebpf_cols = select_feature_columns(cols)
 
-    # Output columns (keep day+label if available)
+    # Always preserve day and label when present so downstream split builders can use them.
     base_out_cols = [c for c in [DAY_COL, LABEL_COL] if c in cols] + baseline_cols
     enh_out_cols = [c for c in [DAY_COL, LABEL_COL] if c in cols] + enhanced_cols
 
@@ -169,16 +230,28 @@ def build_datasets(
 
     label_counts = {}
     day_counts = {}
-    freq_maps_ebpf = None
 
+    # Pass 1 gathers frequency maps for categorical eBPF columns. This matches
+    # the historical dataset build, even though it leaks information across days.
+    freq_maps_ebpf = make_train_aligned_encoding(in_parquet, ebpf_cols, batch_size)
+    if freq_maps_ebpf:
+        print(f"[make_datasets] Fitted full-dataset freq maps for: {list(freq_maps_ebpf)}")
+        print("  WARNING: encoding uses all rows (train+test). For leakage-free")
+        print("  encoding, call make_train_aligned_encoding(train_parquet) instead.")
+    else:
+        print("[make_datasets] No categorical eBPF columns found to encode.")
+
+    # Pass 2 streams the dataset again and writes the two output parquets.
     for df in _iter_batches(in_parquet, batch_size, columns=list(set(base_out_cols + enh_out_cols))):
         if drop_unknown:
+            # Unknown labels are removed here so both output feature sets stay aligned.
             unknown_mask = df[LABEL_COL].astype(str).str.lower().eq("unknown")
             unknown_removed += int(unknown_mask.sum())
             df = df.loc[~unknown_mask].copy()
 
         after_rows += len(df)
 
+        # Keep running label/day summaries so the metadata file can describe the final outputs.
         labs = df[LABEL_COL].astype(str)
         vc = labs.value_counts(dropna=False)
         for k, v in vc.items():
@@ -189,26 +262,20 @@ def build_datasets(
             for d, v in dvc.items():
                 day_counts[str(d)] = day_counts.get(str(d), 0) + int(v)
 
-        # Encode categorical eBPF features (e.g. comm, exe)
-        # First batch: fit freq_maps; subsequent batches: transform only.
+        # Apply the categorical eBPF encoding before we write the enhanced dataset.
         enh_df_raw = df[enh_out_cols].copy()
-        if freq_maps_ebpf is None:
-            enh_df_enc, freq_maps_ebpf = _encode_categorical_ebpf(
-                enh_df_raw, ebpf_cols, fit=True
-            )
-        else:
-            enh_df_enc, _ = _encode_categorical_ebpf(
-                enh_df_raw, ebpf_cols, freq_maps=freq_maps_ebpf, fit=False
-            )
+        enh_df_enc, _ = _encode_categorical_ebpf(
+            enh_df_raw, ebpf_cols, freq_maps=freq_maps_ebpf, fit=False
+        )
 
-        # write baseline (no eBPF cols, no encoding needed)
+        # Write the baseline dataset exactly once per batch with the fixed schema from batch 1.
         base_df = df[base_out_cols]
         if base_writer is None:
             base_schema = pa.Table.from_pandas(base_df.head(1), preserve_index=False).schema
             base_writer = pq.ParquetWriter(out_baseline, schema=base_schema, compression="snappy")
         base_writer.write_table(pa.Table.from_pandas(base_df, preserve_index=False))
 
-        # write enhanced (baseline + eBPF cols, with encoding)
+        # Write the enhanced dataset with the encoded eBPF columns.
         if enh_writer is None:
             enh_schema = pa.Table.from_pandas(enh_df_enc.head(1), preserve_index=False).schema
             enh_writer = pq.ParquetWriter(out_enhanced, schema=enh_schema, compression="snappy")
@@ -219,6 +286,7 @@ def build_datasets(
     if enh_writer:
         enh_writer.close()
 
+    # Persist enough metadata for the notebooks to understand what was written and why.
     meta = {
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "input": str(in_parquet),
@@ -231,7 +299,13 @@ def build_datasets(
         "num_ebpf_features_added": len(ebpf_cols),
         "example_ebpf_cols": ebpf_cols[:25],
         "categorical_ebpf_encoded": {
-            "method": "frequency_encoding (normalised count from full dataset)",
+            "method": "frequency_encoding (two-pass: full-dataset normalised count)",
+            "leakage_warning": (
+                "Freq maps are fit on ALL rows (train+val+test days). "
+                "This introduces leakage into categorical eBPF features. "
+                "Friday test rows receive frequency codes derived partly from Friday data. "
+                "Use make_train_aligned_encoding(train_parquet) for leakage-free encoding."
+            ),
             "note": "Categorical eBPF columns (comm, exe, etc.) converted to float [0,1] freq codes so they survive numeric-only model pipelines.",
             "columns_encoded": list(freq_maps_ebpf.keys()) if freq_maps_ebpf else [],
         },
@@ -260,6 +334,7 @@ def main():
     ap.add_argument("--batch_size", type=int, default=131072)
     args = ap.parse_args()
 
+    # The keep_unknown flag overrides the default drop_unknown behavior.
     drop_unknown = args.drop_unknown and (not args.keep_unknown)
 
     build_datasets(

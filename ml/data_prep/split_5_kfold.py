@@ -113,7 +113,7 @@ def run(
         _in = str(df_or_parquet) if df_or_parquet is not None else str(in_parquet)
         _cleanup_parquet = False
 
-    # out_dir: use temp dir if not provided (caller will write folds themselves)
+    # If the caller only needs the metadata in memory, use a temp directory.
     if out_dir is None:
         tmp_dir = tempfile.mkdtemp()
         _in_out = tmp_dir
@@ -148,14 +148,10 @@ def run_streaming(
     write_test_parquet: bool = False,
 ) -> dict:
     """
-    Run the full k-fold split, materialise each fold's train+test parquets,
-    and return {"folds": [...], "meta": {...}} matching the notebook's expected shape.
+    Materialize fold train/test DataFrames for notebook workflows.
 
-    Each fold dict contains:
-      "name", "train" (DataFrame), "test" (DataFrame),
-      "train_rows", "test_rows", "test_attacks", "unseen_in_train"
-
-    meta contains: total_folds, n_splits, n_repeats, folds (list of fold metadata)
+    This path is heavier than the metadata-only version below because it rebuilds
+    train and test tables for every fold. It is kept for notebook compatibility.
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -166,7 +162,7 @@ def run_streaming(
     groups = grp_df["group"].values
     y_grp  = grp_df["dom_label"].values
 
-    # Build split_map per fold by streaming - collect group sets first
+    # First define the group membership for every fold. No row data is materialized yet.
     fold_defs = []
     split_mode = "stratified"
     eff_splits = n_splits
@@ -189,7 +185,8 @@ def run_streaming(
             "unseen":    sorted(te_labels - tr_labels),
         })
 
-    # Stream the dataset ONCE per fold (memory-safe: only one fold in RAM at a time)
+    # Rebuild each fold by streaming the source parquet and keeping only the rows
+    # whose group key belongs to the current fold definition.
     BENIGN_SET = frozenset({"BENIGN", "Unknown", "nan", "NaN", ""})
     result_folds = []
     for fd in fold_defs:
@@ -261,6 +258,8 @@ def run_metadata_streaming(
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
+    # Build the compact group table once, then compute row counts for each fold
+    # by streaming over the source parquet again without materializing full tables.
     print("[*] Building group table (streaming)...")
     grp_df = build_group_table(in_parquet, batch_size)
     groups = grp_df["group"].values
@@ -342,6 +341,7 @@ def make_report(out_dir: str):
     return json.loads((out / "folds.json").read_text())
 
 def _iter_batches(parquet_path: str, batch_size: int, columns=None):
+    """Yield parquet data in pandas batches for all streaming workflows."""
     pf = pq.ParquetFile(parquet_path)
     for batch in pf.iter_batches(batch_size=batch_size, columns=columns):
         yield batch.to_pandas()
@@ -358,7 +358,12 @@ def _dom_label_from_counter(counter: dict) -> str:
     return "BENIGN"
 
 def build_group_table(in_parquet: str, batch_size: int):
-    # group -> label_counter + n
+    """
+    Build one row per `(orig_h, resp_h)` group with its dominant label and size.
+
+    This compact table is the only object the fold generator needs in memory.
+    """
+    # Track both the total size and label composition for each host-pair group.
     counters = defaultdict(lambda: defaultdict(int))
     sizes = defaultdict(int)
 
@@ -386,7 +391,12 @@ def build_group_table(in_parquet: str, batch_size: int):
     return grp_df
 
 def maybe_write_fold_tests(in_parquet: str, out_dir: Path, folds: list, batch_size: int):
-    """Optionally write fold test.parquet per fold by streaming + filtering groups."""
+    """
+    Optionally write each fold's `test.parquet` by streaming and filtering groups.
+
+    Training rows are intentionally left implicit because writing full train files
+    for every fold would be expensive in both disk space and runtime.
+    """
     pf = pq.ParquetFile(in_parquet)
     schema = None
 
@@ -451,7 +461,7 @@ def main():
         train_groups = groups[tr_idx].tolist()
         test_groups  = groups[te_idx].tolist()
 
-        # unseen dominant labels diagnostic
+        # Record whether the test fold contains dominant labels absent from train.
         tr_labels = set(y_grp[tr_idx])
         te_labels = set(y_grp[te_idx])
         unseen = sorted(te_labels - tr_labels)

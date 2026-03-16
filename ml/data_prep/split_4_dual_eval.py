@@ -78,16 +78,18 @@ def run(
 
 
 def load_report(out_dir: str):
+    """Load the split report for a previously written Split 4 directory."""
     p = Path(out_dir) / "split_report.json"
     return json.loads(p.read_text())
 
 
 def make_report(out_dir: str):
-
+    """Backward-compatible alias that returns the written JSON report."""
     p = Path(out_dir) / "split_report.json"
     return json.loads(p.read_text())
 
 def _iter_batches(parquet_path: str, batch_size: int, columns=None):
+    """Yield parquet data in pandas batches so all passes stay streaming-friendly."""
     pf = pq.ParquetFile(parquet_path)
     for batch in pf.iter_batches(batch_size=batch_size, columns=columns):
         yield batch.to_pandas()
@@ -107,6 +109,7 @@ def _reservoir_update(res, k, row_dict, row_id, seen, rng):
     return res, seen
 
 def _counts_pass(in_parquet: str, batch_size: int):
+    """Count attack families, BENIGN rows, and day totals in one streaming pass."""
     fam_counts = {}
     benign_count = 0
     day_counts = {}
@@ -129,6 +132,7 @@ def _counts_pass(in_parquet: str, batch_size: int):
     return fam_counts, benign_count, day_counts
 
 def _ensure_writer(path: Path, schema: pa.Schema):
+    """Create a Snappy-compressed parquet writer for one output split."""
     return pq.ParquetWriter(str(path), schema=schema, compression="snappy")
 
 
@@ -164,7 +168,7 @@ def write_split(
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    # Temporarily redirect argv so main() can be called in-process
+    # Reuse the CLI path so notebooks and command-line runs stay aligned.
     _old_argv = _sys.argv
     _sys.argv = [
         "split_4_dual_eval",
@@ -212,7 +216,8 @@ def main():
 
     rng = np.random.default_rng(a.seed)
 
-    # pass 1: counts
+    # Pass 1 inspects the dataset to determine the largest balanced test we can
+    # build without inventing rows for any attack family.
     fam_counts, benign_count, day_counts = _counts_pass(a.in_parquet, a.batch_size)
     fams = sorted(fam_counts.keys())
     if not fams:
@@ -232,7 +237,8 @@ def main():
     print(f"  BENIGN in balanced  : {target_benign:,} (ratio {a.benign_ratio:.1f}x)")
     print()
 
-    # pass 2: reservoir balanced test + write val/test_realistic
+    # Pass 2 builds the balanced test by reservoir sampling while also writing
+    # the untouched Thursday validation split and Friday realistic test split.
     res_by_fam = {f: [] for f in fams}
     seen_by_fam = {f: 0 for f in fams}
     benign_res = []
@@ -252,15 +258,17 @@ def main():
             val_writer  = _ensure_writer(out / "val.parquet", schema)
             real_writer = _ensure_writer(out / "test_realistic.parquet", schema)
 
-        # write val / realistic
+        # Thursday becomes validation exactly as it appears in the source data.
         v = df[df[DAY_COL].isin(VAL_DAYS)]
         if len(v):
             val_writer.write_table(_to_schema_table(v, schema))
+        # Friday becomes the untouched realistic test split.
         r = df[df[DAY_COL].isin(REALISTIC_DAYS)]
         if len(r):
             real_writer.write_table(_to_schema_table(r, schema))
 
-        # reservoir sampling (row-by-row once)
+        # Independently sample rows for the balanced test using global row ids so
+        # we can exclude the same rows from training in the final pass.
         for i, row in enumerate(df.to_dict(orient="records")):
             rid = row_id + i
             lab = str(row.get(LABEL_COL))
@@ -280,7 +288,8 @@ def main():
     if real_writer:
         real_writer.close()
 
-    # build balanced test + exclusion set
+    # Build the balanced test file and remember every sampled row id so training
+    # cannot accidentally include it.
     exclude_ids = set()
     parts = []
     for fam in fams:
@@ -292,13 +301,14 @@ def main():
     test_bal = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
     test_bal.to_parquet(out / "test_balanced.parquet", index=False)
 
-    # pass 3: write train (Mon-Wed excluding sampled ids)
+    # Pass 3 writes the Monday-Wednesday training split, excluding any row that
+    # was already sampled into the balanced test set.
     train_writer = None
     row_id = 0
     for df in _iter_batches(a.in_parquet, a.batch_size, columns=None):
         df[DAY_COL] = df[DAY_COL].astype(str)
         if train_writer is None:
-            # reuse schema from earlier if available
+            # Reuse the same schema so all outputs keep consistent dtypes.
             if schema is None:
                 schema = pa.Table.from_pandas(df.head(1), preserve_index=False).schema
             train_writer = _ensure_writer(out / "train.parquet", schema)
@@ -326,10 +336,10 @@ def main():
     if train_writer:
         train_writer.close()
 
-    # report
+    # Recount the written files from disk so the report reflects the final artifacts.
     def _vc(path: Path):
         pf = pq.ParquetFile(str(path))
-        # stream value counts
+        # Count labels in a streaming way so large outputs do not need to be loaded.
         counts = {}
         for batch in pf.iter_batches(batch_size=a.batch_size, columns=[LABEL_COL]):
             s = batch.column(0).to_pandas().astype(str)

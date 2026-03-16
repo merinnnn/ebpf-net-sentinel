@@ -58,11 +58,13 @@ def run(
 
 
 def load_report(out_dir: str):
+    """Load the JSON report for a previously written Split 3 directory."""
     p = Path(out_dir) / "split_report.json"
     return json.loads(p.read_text())
 
 
 def _reservoir_update(res, k, row_dict, seen, rng):
+    """Maintain a uniform reservoir sample from a streaming sequence of rows."""
     seen += 1
     if k <= 0:
         return res, seen
@@ -75,11 +77,13 @@ def _reservoir_update(res, k, row_dict, seen, rng):
     return res, seen
 
 def _iter_batches(parquet_path: str, batch_size: int, columns=None):
+    """Yield the input parquet in pandas batches so the resampler stays memory-safe."""
     pf = pq.ParquetFile(parquet_path)
     for batch in pf.iter_batches(batch_size=batch_size, columns=columns):
         yield batch.to_pandas()
 
 def _value_counts_stream(parquet_path: str, col: str, batch_size: int):
+    """Count values in one parquet column without reading the full file at once."""
     counts = {}
     for df in _iter_batches(parquet_path, batch_size, columns=[col]):
         vc = df[col].astype(str).value_counts(dropna=False)
@@ -92,9 +96,17 @@ def resample_train_stream(train_parquet: str,
                           benign_ratio: float = 3.0,
                           seed: int = 42,
                           batch_size: int = 131072) -> pd.DataFrame:
+    """
+    Rebalance the Split 1 training parquet while leaving evaluation data untouched.
+
+    Small attack classes are kept in full and oversampled up to `target_n`. Larger
+    classes are downsampled with a reservoir. BENIGN is sampled separately to the
+    requested ratio relative to the attack total.
+    """
     rng = np.random.default_rng(seed)
 
-    # pass 1: counts
+    # Pass 1 counts the current training distribution so we know which path each
+    # family should take during resampling.
     counts = _value_counts_stream(train_parquet, LABEL_COL, batch_size)
     fams = sorted(set(counts.keys()) - BENIGN_LIKE - {"BENIGN"})
     benign_count = counts.get("BENIGN", 0)
@@ -105,28 +117,28 @@ def resample_train_stream(train_parquet: str,
     print(f"  benign_ratio        : {benign_ratio:.1f}x")
     print()
 
-    # decide which families need reservoir vs full-keep
+    # Families at or below target_n can be kept in full before oversampling.
     keep_full = {f for f in fams if counts.get(f, 0) <= target_n}
     need_down = {f for f in fams if counts.get(f, 0) > target_n}
 
-    # collect small classes fully (still small)
+    # These families are small enough to keep in memory directly.
     full_rows = {f: [] for f in keep_full}
 
-    # reservoirs for big classes
+    # Larger families are capped with reservoir sampling.
     reservoirs = {f: [] for f in need_down}
     seen = {f: 0 for f in need_down}
 
-    # benign reservoir (size decided after attack resampling target)
+    # BENIGN is sampled after we know the total target size for all attack families.
     total_attack_target = target_n * len(fams)
     target_benign = min(int(benign_ratio * total_attack_target), benign_count)
     benign_res = []
     benign_seen = 0
 
-    # pass 2: stream and fill
+    # Pass 2 actually collects the rows using the strategy chosen above.
     for df in _iter_batches(train_parquet, batch_size, columns=None):
         labels = df[LABEL_COL].astype(str)
 
-        # benign
+        # Sample BENIGN rows into its own reservoir.
         if target_benign > 0:
             ben = df[labels == "BENIGN"]
             if len(ben):
@@ -135,7 +147,7 @@ def resample_train_stream(train_parquet: str,
                         benign_res, target_benign, row, benign_seen, rng
                     )
 
-        # attacks
+        # Either keep rows directly or feed them through a family-specific reservoir.
         for fam in fams:
             sub = df[labels == fam]
             if not len(sub):
@@ -148,14 +160,14 @@ def resample_train_stream(train_parquet: str,
                         reservoirs[fam], target_n, row, seen[fam], rng
                     )
 
-    # build resampled attack parts
+    # Convert the collected rows into the final rebalanced training table.
     parts = []
     print("  Family resampling:")
     for fam in fams:
         n_have = counts.get(fam, 0)
         if fam in keep_full:
             base = pd.DataFrame(full_rows[fam])
-            # oversample with replacement to reach target_n
+            # Oversample the small family with replacement until it reaches target_n.
             if len(base) == 0:
                 continue
             n_extra = max(0, target_n - len(base))
@@ -173,13 +185,13 @@ def resample_train_stream(train_parquet: str,
         parts.append(samp)
         print(f"    {fam:<22s}  {n_have:>6,} -> {len(samp):>6,}  {action}")
 
-    # benign
+    # BENIGN is appended after the attack families so its size is easy to inspect.
     benign_df = pd.DataFrame(benign_res)
     print(f"    {'BENIGN':<22s}  {benign_count:>6,} -> {len(benign_df):>6,}  reservoir(sample)")
     parts.append(benign_df)
 
     train_new = pd.concat(parts, ignore_index=True)
-    # shuffle
+    # Shuffle once at the end so the written parquet does not preserve class blocks.
     train_new = train_new.sample(frac=1.0, random_state=seed).reset_index(drop=True)
     return train_new
 
@@ -204,10 +216,11 @@ def write_split(
     val_p   = split1 / "val.parquet"
     test_p  = split1 / "test.parquet"
 
+    # Only the training split is resampled. Validation and test remain untouched.
     train_new = resample_train_stream(str(train_p), target_n, benign_ratio, seed, batch_size)
     train_new.to_parquet(out / "train.parquet", index=False)
 
-    # copy val/test unchanged
+    # Preserve the original evaluation splits exactly so comparisons stay honest.
     shutil.copy2(val_p, out / "val.parquet")
     shutil.copy2(test_p, out / "test.parquet")
 
@@ -239,6 +252,7 @@ def write_split(
 
 
 def make_report(train_df: pd.DataFrame, val_parquet: str, test_parquet: str, batch_size: int):
+    """Return per-split label counts after the resampled training set is written."""
     rep = {}
     rep["train"] = {k: int(v) for k, v in train_df[LABEL_COL].astype(str).value_counts(dropna=False).items()}
     rep["val"]   = {k: int(v) for k, v in _value_counts_stream(val_parquet, LABEL_COL, batch_size).items()}
@@ -270,7 +284,7 @@ def main():
     train_new = resample_train_stream(str(train_p), a.target_n, a.benign_ratio, a.seed, a.batch_size)
     train_new.to_parquet(out / "train.parquet", index=False)
 
-    # copy val/test unchanged (no RAM)
+    # Copy validation and test directly from Split 1 to avoid unnecessary RAM use.
     shutil.copy2(val_p, out / "val.parquet")
     shutil.copy2(test_p, out / "test.parquet")
 

@@ -72,9 +72,13 @@ def load_report(out_dir: str):
     return json.loads(p.read_text())
 
 
-# reservoir sampling
 def _reservoir_update(res, k, row_dict, seen, rng):
-    """Keep a uniform random sample of size k from a stream."""
+    """
+    Keep a uniform random sample of size `k` from a streaming source.
+
+    This lets the split builder downsample classes without ever materializing
+    the full class in memory.
+    """
     seen += 1
     if k <= 0:
         return res, seen
@@ -86,13 +90,14 @@ def _reservoir_update(res, k, row_dict, seen, rng):
             res[j] = row_dict
     return res, seen
 
-# streaming helpers
 def _iter_batches(parquet_path: str, batch_size: int, columns=None):
+    """Yield pandas DataFrames from a Parquet file in fixed-size batches."""
     pf = pq.ParquetFile(parquet_path)
     for batch in pf.iter_batches(batch_size=batch_size, columns=columns):
         yield batch.to_pandas()
 
 def _build_meta(seed, parts, **extra):
+    """Assemble the report metadata shared by the CLI and notebook entry points."""
     total = sum(len(v) for v in parts.values())
     atk   = {s: int((~parts[s][LABEL_COL].astype(str).isin(BENIGN_LIKE)).sum())
              for s in parts}
@@ -113,6 +118,7 @@ def _build_meta(seed, parts, **extra):
     }
 
 def make_report(parts: dict) -> dict:
+    """Return per-split label counts in a JSON-friendly format."""
     rep = {}
     for k, df in parts.items():
         vc = df[LABEL_COL].astype(str).value_counts(dropna=False)
@@ -131,6 +137,7 @@ def _collapse_rare_for_stratify(y: pd.Series, min_count: int = 2, other: str = "
 
 
 def _can_stratify(y: pd.Series, min_count: int = 2) -> bool:
+    """Check whether every class has enough rows for sklearn stratification."""
     y = y.astype(str)
     if y.nunique(dropna=False) <= 1:
         return False
@@ -151,7 +158,7 @@ def _safe_train_test_split(df: pd.DataFrame, *, test_size: float, seed: int, y: 
     try:
         return train_test_split(df, test_size=test_size, random_state=seed, stratify=strat)
     except ValueError:
-        # Fallback for edge cases where sklearn still cannot split.
+        # When stratification still fails, fall back to a deterministic shuffle split.
         n = len(df)
         n_test = int(round(float(test_size) * n))
         n_test = max(1, min(n - 1, n_test))
@@ -171,11 +178,17 @@ def run_streaming(in_parquet: str,
                   test_frac: float = 0.15,
                   seed: int = 42,
                   batch_size: int = 131072) -> dict:
+    """
+    Build the balanced-core sample in streaming mode and split it into train/val/test.
+
+    The dataset is first quota-capped per attack family, then BENIGN is sampled to
+    the requested ratio, and only then is the balanced core split stratified.
+    """
     assert abs(train_frac + val_frac + test_frac - 1.0) < 1e-9
 
     rng = np.random.default_rng(seed)
 
-    # pass 1: counts
+    # Pass 1 only counts rows per family so we can decide the sampling targets.
     counts = {}
     benign_count = 0
     for df in _iter_batches(in_parquet, batch_size, columns=[LABEL_COL]):
@@ -200,7 +213,7 @@ def run_streaming(in_parquet: str,
     print(f"  BENIGN ratio      : {benign_ratio:.1f}x  (benign = ratio x total_attack_rows)")
     print()
 
-    # Determine targets
+    # Convert the requested policy into concrete sample sizes for each class.
     target = {}
     for fam in fams:
         if equal:
@@ -211,17 +224,18 @@ def run_streaming(in_parquet: str,
     total_attack_target = sum(target.values())
     target_benign = min(int(benign_ratio * total_attack_target), benign_count)
 
-    # pass 2: reservoirs
+    # Pass 2 runs reservoir sampling so each family reaches its target size.
     reservoirs = {fam: [] for fam in fams}
     seen = {fam: 0 for fam in fams}
     benign_res = []
     benign_seen = 0
 
-    cols = None  # keep all columns for the output
+    # Keep all columns because the output split parquets should match the source schema.
+    cols = None
     for df in _iter_batches(in_parquet, batch_size, columns=cols):
         labels = df[LABEL_COL].astype(str)
 
-        # benign
+        # BENIGN is sampled to a ratio relative to the attack total.
         if target_benign > 0:
             ben = df[labels == "BENIGN"]
             if len(ben):
@@ -230,7 +244,7 @@ def run_streaming(in_parquet: str,
                         benign_res, target_benign, row, benign_seen, rng
                     )
 
-        # attacks
+        # Each attack family is sampled independently to its own target.
         for fam in fams:
             k = target[fam]
             if k <= 0:
@@ -255,7 +269,7 @@ def run_streaming(in_parquet: str,
     balanced = pd.concat(parts, ignore_index=True)
     balanced[LABEL_COL] = balanced[LABEL_COL].astype(str)
 
-    # split stratified
+    # Split the balanced core into train first, then divide the remainder into val/test.
     y = balanced[LABEL_COL].astype(str)
     train_df, temp_df = _safe_train_test_split(
         balanced,
@@ -297,10 +311,15 @@ def write_split(
     seed: int = 42,
     batch_size: int = 131072,
 ) -> Path:
-    """Helper used by notebooks: run streaming split and write Parquets + report."""
+    """
+    Run the streaming sampler, write parquet outputs, and persist the report.
+
+    This is the single file-writing path used by both the CLI and notebook API.
+    """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
+    # Build the in-memory balanced core and the three split DataFrames.
     result = run_streaming(
         in_parquet,
         quota=quota,
@@ -314,6 +333,7 @@ def write_split(
     )
 
     for s in ["train", "val", "test"]:
+        # Write the final split tables exactly once after sampling is complete.
         result[s].to_parquet(out / f"{s}.parquet", index=False)
     (out / "split_report.json").write_text(
         json.dumps({**result["meta"], "splits": make_report({k: result[k] for k in ["train","val","test"]})}, indent=2)
@@ -338,6 +358,7 @@ def main():
     out = Path(a.out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
+    # The CLI shares the same streaming implementation used by the notebook wrapper.
     result = run_streaming(
         a.in_parquet, a.quota, a.benign_ratio, a.equal,
         a.train_frac, a.val_frac, a.test_frac, a.seed, a.batch_size
