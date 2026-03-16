@@ -34,6 +34,7 @@ data/
   runs/
     live_<timestamp>/
       ebpf_events.jsonl
+      scored_events.jsonl
       ebpf_agg.jsonl
       merged.csv
       run_meta.json
