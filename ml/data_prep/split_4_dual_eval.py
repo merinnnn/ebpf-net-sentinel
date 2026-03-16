@@ -157,9 +157,7 @@ def write_split(
 ) -> dict:
     """
     Helper used by notebooks: runs the full streaming split, writes all four
-    parquet files + split_report.json, and returns a dict of DataFrames + meta.
-
-    Returns {"train": df, "val": df, "test_balanced": df, "test_realistic": df, "meta": dict}.
+    parquet files + split_report.json, and returns the report metadata.
     """
     import sys as _sys
 
@@ -183,18 +181,17 @@ def write_split(
     finally:
         _sys.argv = _old_argv
 
-    train_df   = pd.read_parquet(out / "train.parquet")
-    val_df     = pd.read_parquet(out / "val.parquet")
-    test_bal   = pd.read_parquet(out / "test_balanced.parquet")
-    test_real  = pd.read_parquet(out / "test_realistic.parquet")
-    meta       = json.loads((out / "split_report.json").read_text())
-
+    meta = json.loads((out / "split_report.json").read_text())
     return {
-        "train":          train_df,
-        "val":            val_df,
-        "test_balanced":  test_bal,
-        "test_realistic": test_real,
-        "meta":           meta,
+        **meta,
+        "meta": meta,
+        "paths": {
+            "train": str(out / "train.parquet"),
+            "val": str(out / "val.parquet"),
+            "test_balanced": str(out / "test_balanced.parquet"),
+            "test_realistic": str(out / "test_realistic.parquet"),
+            "report": str(out / "split_report.json"),
+        },
     }
 
 

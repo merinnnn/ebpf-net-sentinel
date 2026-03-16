@@ -194,7 +194,7 @@ def write_split(
 ) -> dict:
     """
     Helper used by notebooks: resample train, copy val/test, write report.
-    Returns {"train": df, "val": df, "test": df, "meta": dict}.
+    Returns the report metadata after all parquet artifacts are written.
     """
     split1 = Path(split1_dir)
     out    = Path(out_dir)
@@ -205,13 +205,11 @@ def write_split(
     test_p  = split1 / "test.parquet"
 
     train_new = resample_train_stream(str(train_p), target_n, benign_ratio, seed, batch_size)
+    train_new.to_parquet(out / "train.parquet", index=False)
 
     # copy val/test unchanged
     shutil.copy2(val_p, out / "val.parquet")
     shutil.copy2(test_p, out / "test.parquet")
-
-    val_df  = pd.read_parquet(out / "val.parquet")
-    test_df = pd.read_parquet(out / "test.parquet")
 
     meta = {
         "protocol": "split_3_train_resampled_streaming",
@@ -222,13 +220,22 @@ def write_split(
         "source_split1": str(split1),
         "rows": {
             "train": int(len(train_new)),
-            "val":   int(len(val_df)),
-            "test":  int(len(test_df)),
+            "val":   int(pq.ParquetFile(str(val_p)).metadata.num_rows),
+            "test":  int(pq.ParquetFile(str(test_p)).metadata.num_rows),
         },
-        "splits": make_report(train_new, str(out / "val.parquet"), str(out / "test.parquet"), batch_size),
+        "splits": make_report(train_new, str(val_p), str(test_p), batch_size),
     }
     (out / "split_report.json").write_text(json.dumps(meta, indent=2))
-    return {"train": train_new, "val": val_df, "test": test_df, "meta": meta}
+    return {
+        **meta,
+        "meta": meta,
+        "paths": {
+            "train": str(out / "train.parquet"),
+            "val": str(out / "val.parquet"),
+            "test": str(out / "test.parquet"),
+            "report": str(out / "split_report.json"),
+        },
+    }
 
 
 def make_report(train_df: pd.DataFrame, val_parquet: str, test_parquet: str, batch_size: int):
