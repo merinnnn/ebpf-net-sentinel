@@ -7,3 +7,6 @@ folderWatchBlacklist = ["data", "ml", "ebpf_core", ".git", "__pycache__"]
 
 [browser]
 gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"
