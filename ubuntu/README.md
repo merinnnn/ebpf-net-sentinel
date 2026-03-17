@@ -6,7 +6,7 @@ The full pipeline turns raw PCAP files into a labelled, merged dataset ready for
 **Pipeline overview:**
 
 ``` bash
-PCAPs  -->  run_capture.sh  -->  merge_zeek_ebpf.py  -->  label_runs_multiclass.py  -->  labeled .parquet
+PCAPs  -->  data_collection/run_capture.sh  -->  data_collection/merge_zeek_ebpf.py  -->  data_collection/label_runs_multiclass.py  -->  labeled .parquet
 ```
 
 ---
@@ -27,7 +27,7 @@ PCAPs  -->  run_capture.sh  -->  merge_zeek_ebpf.py  -->  label_runs_multiclass.
 Quick install (recommended):
 
 ```bash
-bash ubuntu/setup.sh
+bash ubuntu/setup/setup.sh
 ```
 
 ---
@@ -75,7 +75,7 @@ sudo ip link set veth1 up
 **Automatic:**
 
 ```bash
-sudo bash ubuntu/setup_veth.sh veth0 veth1 9000
+sudo bash ubuntu/setup/setup_veth.sh veth0 veth1 9000
 ```
 
 **Expected output:**
@@ -102,7 +102,7 @@ Both interfaces should show `state UP`. If you used the helper with `9000`, both
 
 ```bash
 # Replay into veth0, capture on veth1, at ~10 Mbps
-REPLAY_IFACE=veth0 SET_MTU=9000 bash ubuntu/run_capture.sh Monday-WorkingHours.pcap veth1 10
+REPLAY_IFACE=veth0 SET_MTU=9000 bash ubuntu/data_collection/run_capture.sh Monday-WorkingHours.pcap veth1 10
 ```
 
 Notes:
@@ -113,7 +113,7 @@ Notes:
 * If you change eBPF/Go code or see unexpected netmon failures, rebuild cleanly:
 
   ```bash
-  REPLAY_IFACE=veth0 SET_MTU=9000 FORCE_BUILD=1 bash ubuntu/run_capture.sh Monday-WorkingHours.pcap veth1 10
+  REPLAY_IFACE=veth0 SET_MTU=9000 FORCE_BUILD=1 bash ubuntu/data_collection/run_capture.sh Monday-WorkingHours.pcap veth1 10
   ```
 
 **Expected output**: a timestamped run folder containing:
@@ -137,7 +137,7 @@ While running it continuously refreshes:
 * `data/runtime/live_capture_state.json` (current run + file paths for the web app)
 
 ```bash
-sudo bash ubuntu/run_live.sh <IFACE>
+sudo bash ubuntu/live/run_live.sh <IFACE>
 ```
 
 **Expected output:**
@@ -156,7 +156,7 @@ sudo bash ubuntu/run_live.sh <IFACE>
 Uses `run_meta.json` to synchronise timestamps between PCAP time and capture time.
 
 ```bash
-python3 ubuntu/merge_zeek_ebpf.py \
+python3 ubuntu/data_collection/merge_zeek_ebpf.py \
   --zeek_conn data/runs/<YYYY-MM-DD_HHMMSS>/zeek/conn.csv \
   --ebpf_agg  data/runs/<YYYY-MM-DD_HHMMSS>/ebpf_agg.jsonl \
   --run_meta  data/runs/<YYYY-MM-DD_HHMMSS>/run_meta.json \
@@ -192,7 +192,7 @@ Key flags:
 **Single run:**
 
 ```bash
-python3 ubuntu/label_runs_multiclass.py \
+python3 ubuntu/data_collection/label_runs_multiclass.py \
   --runs      data/runs/<YYYY-MM-DD_HHMMSS> \
   --labels_dir data/cicids2017_csv/GeneratedLabelledFlows/TrafficLabelling \
   --out_dir   data/datasets/labeled_runs \
@@ -230,13 +230,13 @@ for DAY in Monday Tuesday Wednesday Thursday Friday; do
   echo "Processing $DAY"
 
   LOG="$(mktemp)"
-  REPLAY_IFACE=veth0 SET_MTU=9000 bash ubuntu/run_capture.sh \
+  REPLAY_IFACE=veth0 SET_MTU=9000 bash ubuntu/data_collection/run_capture.sh \
     "${DAY}-WorkingHours.pcap" veth1 topspeed | tee "$LOG"
 
   OUT="$(awk -F= '/^RUN_DIR=/{print $2; exit}' "$LOG")"
   rm -f "$LOG"
 
-  python3 ubuntu/merge_zeek_ebpf.py \
+  python3 ubuntu/data_collection/merge_zeek_ebpf.py \
     --zeek_conn "$OUT/zeek/conn.csv" \
     --ebpf_agg  "$OUT/ebpf_agg.jsonl" \
     --run_meta  "$OUT/run_meta.json" \
@@ -246,7 +246,7 @@ for DAY in Monday Tuesday Wednesday Thursday Friday; do
   RUN_DIRS+=( "$OUT" )
 done
 
-python3 ubuntu/label_runs_multiclass.py \
+python3 ubuntu/data_collection/label_runs_multiclass.py \
   --runs      "${RUN_DIRS[@]}" \
   --labels_dir data/cicids2017_csv/GeneratedLabelledFlows/TrafficLabelling \
   --out_dir   data/datasets/labeled_runs \
