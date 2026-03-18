@@ -1,6 +1,6 @@
 ARG UBUNTU_VERSION=20.04
 
-FROM ubuntu:${UBUNTU_VERSION} AS live_monitor_app
+FROM ubuntu:${UBUNTU_VERSION} AS live_net_sentinel
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
@@ -17,7 +17,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 WORKDIR /opt/netsentinel
 
-LABEL org.opencontainers.image.title="live-monitor-app"
+LABEL org.opencontainers.image.title="live-net-sentinel"
 LABEL org.opencontainers.image.description="Container image for the NetSentinel Live Monitor App"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -55,4 +55,4 @@ RUN /opt/netsentinel/docker/install_live_deps.sh
 EXPOSE 8501
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/opt/netsentinel/docker/entrypoint.sh"]
-CMD ["live-monitor-app"]
+CMD ["live-net-sentinel"]
