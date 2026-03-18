@@ -8,7 +8,7 @@ set -euo pipefail
 #   4) Stop netmon and leave all artifacts in data/runs/<timestamp>/
 #
 # Usage:
-#   bash ubuntu/run_capture.sh <pcap_name_or_path> <IFACE_CAPTURE> <MBPS|topspeed>
+#   bash ubuntu/data_collection/run_capture.sh <pcap_name_or_path> <IFACE_CAPTURE> <MBPS|topspeed>
 #
 # Optional env:
 #   REPLAY_IFACE=<iface>     # where tcpreplay sends packets (default: IFACE_CAPTURE)
@@ -27,11 +27,11 @@ IFACE_CAPTURE="${2:-}"
 MBPS="${3:-}"
 
 if [[ -z "$PCAP_IN" || -z "$IFACE_CAPTURE" || -z "${MBPS:-}" ]]; then
-  echo "Usage: bash ubuntu/run_capture.sh <pcap> <iface_capture> <mbps|topspeed>"
+  echo "Usage: bash ubuntu/data_collection/run_capture.sh <pcap> <iface_capture> <mbps|topspeed>"
   exit 2
 fi
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DATA_DIR="$ROOT_DIR/data"
 PCAP_DIR="$DATA_DIR/cicids2017_pcap"
 
@@ -206,7 +206,7 @@ if [[ ! -f "$ZEEK_OUT_DIR/conn.log" ]]; then
   exit 1
 fi
 
-python3 "$ROOT_DIR/ubuntu/zeek_conn_to_csv.py" --in "$ZEEK_OUT_DIR/conn.log" --out "$ZEEK_OUT_DIR/conn.csv"
+python3 "$ROOT_DIR/ubuntu/data_collection/zeek_conn_to_csv.py" --in "$ZEEK_OUT_DIR/conn.log" --out "$ZEEK_OUT_DIR/conn.csv"
 echo "[*] Wrote $ZEEK_OUT_DIR/conn.csv"
 
 echo "[*] [3/6] Build eBPF collector"

@@ -4,10 +4,10 @@ set -euo pipefail
 # Create a veth pair for local PCAP replay testing.
 #
 # Usage:
-#   sudo bash ubuntu/setup_veth.sh [veth_a] [veth_b] [mtu]
+#   sudo bash ubuntu/setup/setup_veth.sh [veth_a] [veth_b] [mtu]
 #
 # Example:
-#   sudo bash ubuntu/setup_veth.sh veth0 veth1 9000
+#   sudo bash ubuntu/setup/setup_veth.sh veth0 veth1 9000
 
 A="${1:-veth0}"
 B="${2:-veth1}"
