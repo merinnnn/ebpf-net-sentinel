@@ -16,6 +16,7 @@ sudo apt-get install -y \
   libbpf-dev libelf-dev zlib1g-dev \
   tcpreplay tcpdump \
   tshark \
+  ethtool \
   python3 python3-pip python3-venv
 
 # Install Go 1.21+ (1.13.8 on ubuntu 20.04)
