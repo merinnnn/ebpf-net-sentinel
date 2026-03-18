@@ -1,10 +1,10 @@
 services:
-  live-monitor-app:
+  live-net-sentinel:
     build:
       context: .
-      target: live_monitor_app
-    image: live-monitor-app:latest
-    container_name: live-monitor-app
+      target: live_net_sentinel
+    image: live-net-sentinel:latest
+    container_name: live-net-sentinel
     privileged: true
     pid: host
     network_mode: host
@@ -14,11 +14,14 @@ services:
       NETSENTINEL_APP_CACHE_DIR: /opt/netsentinel/data/app
       NETSENTINEL_DISABLE_EXTERNAL_FONTS: "true"
       NETSENTINEL_GENERATE_MOCK_LIVE_RUN: "false"
-      NETSENTINEL_AUTOSTART_LIVE_CAPTURE: "true"
+      NETSENTINEL_AUTOSTART_LIVE_CAPTURE: "false"
+      DISABLE_KPROBES: "0"
+      POLL_SECS: "1"
       PORT: "8501"
     volumes:
       - ./data:/opt/netsentinel/data
       - /sys/kernel/btf:/sys/kernel/btf:ro
+      - /sys/kernel/tracing:/sys/kernel/tracing:ro
       - /sys/fs/bpf:/sys/fs/bpf
       - /lib/modules:/lib/modules:ro
       - /usr/src:/usr/src:ro
