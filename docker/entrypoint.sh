@@ -19,8 +19,8 @@ run_live_monitor() {
   exec streamlit run app/app.py --server.address="${HOST}" --server.port="${PORT}"
 }
 
-case "${1:-live-monitor-app}" in
-  live-monitor-app|live-monitor)
+case "${1:-live-net-sentinel}" in
+  live-net-sentinel|live-monitor)
     shift || true
     run_live_monitor "$@"
     ;;
