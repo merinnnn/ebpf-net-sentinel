@@ -257,7 +257,7 @@ def match_flows_with_deduplication(zeek_df: pd.DataFrame, ebpf_df: pd.DataFrame,
         
         # Build eBPF lookup dict (key -> first occurrence)
         ebpf_lookup = {}
-        for idx, row in ebpf_df.iterrows():
+        for _, row in ebpf_df.iterrows():
             key = row['key']
             if key not in ebpf_lookup:
                 ebpf_lookup[key] = row
@@ -271,19 +271,16 @@ def match_flows_with_deduplication(zeek_df: pd.DataFrame, ebpf_df: pd.DataFrame,
         matched_data = []
         stats = {'fwd': 0, 'rev': 0, 'unmatched': 0}
         
-        for idx, zrow in zeek_df.iterrows():
+        for _, zrow in zeek_df.iterrows():
             ebpf_match = None
-            direction = None
-            
+
             # Try forward match
             if zrow['key_fwd'] in ebpf_lookup:
                 ebpf_match = ebpf_lookup[zrow['key_fwd']]
-                direction = 'forward'
                 stats['fwd'] += 1
             # Try reverse match
             elif zrow['key_rev'] in ebpf_lookup:
                 ebpf_match = ebpf_lookup[zrow['key_rev']]
-                direction = 'reverse'
                 stats['rev'] += 1
             else:
                 stats['unmatched'] += 1
