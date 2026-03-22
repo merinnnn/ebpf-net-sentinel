@@ -138,7 +138,7 @@ def evaluate_binary(y_true: np.ndarray, y_pred: np.ndarray,
     if y_scores is not None:
         try:
             metrics["roc_auc"] = float(roc_auc_score(y_true, y_scores))
-        except:
+        except Exception:
             metrics["roc_auc"] = None
     
     return metrics
