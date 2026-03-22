@@ -6,6 +6,7 @@ data/*
 ebpf_core/bpf/vmlinux.h
 ebpf_core/netmon.bpf.o
 ebpf_core/netmon
+ebpf_core/cmd/netmon
 
 # Commit only the final research artifacts needed for the paper/thesis
 !data/reports/
@@ -67,6 +68,10 @@ __pycache__/
 
 # C extensions
 *.so
+
+# Hydra generated files
+.hydra/
+hydra.restore
 
 # Distribution / packaging
 .Python
