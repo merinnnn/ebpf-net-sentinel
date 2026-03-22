@@ -186,19 +186,9 @@ def model_candidates(seed: int = 42) -> Dict[str, Pipeline]:
     (RF_PARAMS / HGB_PARAMS) so that "generalisation" notebooks do not accidentally
     re-train different models than the headline experiments.
     """
-    try:
-        from ml.notebooks.experiment_config import RF_PARAMS, HGB_PARAMS
-        _rf = dict(RF_PARAMS)
-        _hgb = dict(HGB_PARAMS)
-    except Exception:
-        _rf = dict(
-            n_estimators=400, max_depth=22, min_samples_leaf=2,
-            class_weight="balanced_subsample", n_jobs=-1, random_state=seed,
-        )
-        _hgb = dict(
-            max_iter=350, learning_rate=0.05, max_depth=8, min_samples_leaf=30,
-            early_stopping=True, validation_fraction=0.1, n_iter_no_change=20, random_state=seed,
-        )
+    from ml.notebooks.experiment_config import RF_PARAMS, HGB_PARAMS
+    _rf = dict(RF_PARAMS)
+    _hgb = dict(HGB_PARAMS)
 
     # Ensure seed is applied even if config already includes it
     _rf["random_state"] = seed

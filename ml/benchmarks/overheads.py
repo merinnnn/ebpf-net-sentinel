@@ -40,11 +40,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from ml.notebooks.modeling_pipeline import prepare_split, align_to_features
 
-# Optional dependency
-try:
-    import psutil  # type: ignore
-except Exception:
-    psutil = None
+import psutil
 
 
 def read_split_parquet(splits_dir: Path, split_name: str) -> pd.DataFrame:

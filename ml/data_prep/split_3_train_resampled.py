@@ -22,10 +22,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-try:
-    import pyarrow.parquet as pq
-except Exception as e:  # pragma: no cover
-    raise SystemExit("pyarrow is required for memory-safe resampling. Please `pip install pyarrow`.") from e
+import pyarrow.parquet as pq
 
 LABEL_COL   = "label_family"
 BENIGN_LIKE = frozenset({"BENIGN", "Unknown", "nan", "NaN", ""})

@@ -28,11 +28,8 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import RepeatedStratifiedKFold, KFold
 
-try:
-    import pyarrow.parquet as pq
-    import pyarrow as pa
-except Exception as e:  # pragma: no cover
-    raise SystemExit("pyarrow is required. Please `pip install pyarrow`.") from e
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 LABEL_COL   = "label_family"
 SRC_COL     = "orig_h"

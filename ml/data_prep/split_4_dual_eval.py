@@ -16,11 +16,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-try:
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-except Exception as e:  # pragma: no cover
-    raise SystemExit("pyarrow is required. Please `pip install pyarrow`.") from e
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 LABEL_COL   = "label_family"
 DAY_COL     = "day"

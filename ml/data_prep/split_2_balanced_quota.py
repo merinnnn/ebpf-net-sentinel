@@ -23,11 +23,8 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
-try:
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-except Exception as e:  # pragma: no cover
-    raise SystemExit("pyarrow is required for memory-safe splitting. Please `pip install pyarrow`.") from e
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 LABEL_COL   = "label_family"
 BENIGN_LIKE = frozenset({"BENIGN", "Unknown", "nan", "NaN", ""})
