@@ -50,7 +50,6 @@ DIM      = "#5a7090"
 SURFACE  = "#111722"
 SURFACE2 = "#161e2c"
 BORDER   = "#1e2d3d"
-BG       = "#0b0e14"
 TEXT     = "#ccd6e8"
 
 ATTACK_COLORS = {
@@ -1383,7 +1382,6 @@ with st.sidebar:
         S.loaded_model = ""
         S.loaded_threshold = None
         st.rerun()
-    S.model = selected_model
     S.threshold    = st.slider("Anomaly threshold", 0.0, 1.0, S.threshold, 0.01)
     st.checkbox("Show anomalies only", key="filter_anom")
     S.poll_interval = st.select_slider("Refresh interval (s)", options=[0.5, 1, 2, 3, 5], value=S.poll_interval)
