@@ -376,12 +376,12 @@ def main():
             n_estimators=args.rf_n_estimators,
             max_depth=args.rf_max_depth,
             n_jobs=-1,
-            random_state=42,
+            random_state=104,
         )
         hgb = HistGradientBoostingClassifier(
             max_iter=args.hgb_max_iter,
             learning_rate=args.hgb_learning_rate,
-            random_state=42,
+            random_state=104,
         )
 
         # Fit baseline
