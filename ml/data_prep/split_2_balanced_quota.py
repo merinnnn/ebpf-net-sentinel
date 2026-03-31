@@ -41,7 +41,7 @@ def run(
     train_frac: float = 0.70,
     val_frac: float = 0.15,
     test_frac: float = 0.15,
-    seed: int = 42,
+    seed: int = 104,
     batch_size: int = 131072,
 ):
     """
@@ -173,7 +173,7 @@ def run_streaming(in_parquet: str,
                   train_frac: float = 0.70,
                   val_frac: float = 0.15,
                   test_frac: float = 0.15,
-                  seed: int = 42,
+                  seed: int = 104,
                   batch_size: int = 131072) -> dict:
     """
     Build the balanced-core sample in streaming mode and split it into train/val/test.
@@ -305,7 +305,7 @@ def write_split(
     train_frac: float = 0.70,
     val_frac: float = 0.15,
     test_frac: float = 0.15,
-    seed: int = 42,
+    seed: int = 104,
     batch_size: int = 131072,
 ) -> Path:
     """
@@ -348,7 +348,7 @@ def main():
     ap.add_argument("--train_frac", type=float, default=0.70)
     ap.add_argument("--val_frac",   type=float, default=0.15)
     ap.add_argument("--test_frac",  type=float, default=0.15)
-    ap.add_argument("--seed",       type=int,   default=42)
+    ap.add_argument("--seed",       type=int,   default=104)
     ap.add_argument("--batch_size", type=int,   default=131072)
     a = ap.parse_args()
 

@@ -86,7 +86,7 @@ def run(
     out_dir: str = None,
     n_splits: int = 5,
     n_repeats: int = 3,
-    seed: int = 42,
+    seed: int = 104,
     batch_size: int = 131072,
     write_test_parquet: bool = False,
 ):
@@ -140,7 +140,7 @@ def run_streaming(
     out_dir: str,
     n_splits: int = 5,
     n_repeats: int = 3,
-    seed: int = 42,
+    seed: int = 104,
     batch_size: int = 131072,
     write_test_parquet: bool = False,
 ) -> dict:
@@ -243,7 +243,7 @@ def run_metadata_streaming(
     out_dir: str,
     n_splits: int = 5,
     n_repeats: int = 3,
-    seed: int = 42,
+    seed: int = 104,
     batch_size: int = 131072,
 ) -> dict:
     """
@@ -425,7 +425,7 @@ def main():
     ap.add_argument("--out_dir", required=True)
     ap.add_argument("--n_splits", type=int, default=5)
     ap.add_argument("--n_repeats", type=int, default=3)
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--seed", type=int, default=104)
     ap.add_argument("--batch_size", type=int, default=131072)
     ap.add_argument("--write_test_parquet", action="store_true",
                     help="Optionally materialise each fold's test.parquet (train is implicit).")

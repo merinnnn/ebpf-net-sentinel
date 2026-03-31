@@ -36,7 +36,7 @@ def run(
     out_dir: str,
     quota: int = 500,
     benign_ratio: float = 1.0,
-    seed: int = 42,
+    seed: int = 104,
     batch_size: int = 131072,
     min_effective_quota: int = 1,
 ):
@@ -152,7 +152,7 @@ def write_split(
     out_dir: str,
     quota: int = 500,
     benign_ratio: float = 1.0,
-    seed: int = 42,
+    seed: int = 104,
     batch_size: int = 131072,
     min_effective_quota: int = 1,
 ) -> dict:
@@ -202,7 +202,7 @@ def main():
     ap.add_argument("--out_dir", required=True)
     ap.add_argument("--quota", type=int, default=500)
     ap.add_argument("--benign_ratio", type=float, default=1.0)
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--seed", type=int, default=104)
     ap.add_argument("--batch_size", type=int, default=131072)
     ap.add_argument("--min_effective_quota", type=int, default=50,
                     help="Fail if effective quota drops below this (prevents tiny balanced tests)")

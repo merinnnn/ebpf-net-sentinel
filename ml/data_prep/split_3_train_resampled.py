@@ -35,7 +35,7 @@ def run(
     out_dir: str,
     target_n: int = 5000,
     benign_ratio: float = 3.0,
-    seed: int = 42,
+    seed: int = 104,
     batch_size: int = 131072,
 ):
     """
@@ -91,7 +91,7 @@ def _value_counts_stream(parquet_path: str, col: str, batch_size: int):
 def resample_train_stream(train_parquet: str,
                           target_n: int = 5000,
                           benign_ratio: float = 3.0,
-                          seed: int = 42,
+                          seed: int = 104,
                           batch_size: int = 131072) -> pd.DataFrame:
     """
     Rebalance the Split 1 training parquet while leaving evaluation data untouched.
@@ -198,7 +198,7 @@ def write_split(
     out_dir: str,
     target_n: int = 5000,
     benign_ratio: float = 3.0,
-    seed: int = 42,
+    seed: int = 104,
     batch_size: int = 131072,
 ) -> dict:
     """
@@ -262,7 +262,7 @@ def main():
     ap.add_argument("--out_dir",    required=True)
     ap.add_argument("--target_n",   type=int,   default=5000)
     ap.add_argument("--benign_ratio", type=float, default=3.0)
-    ap.add_argument("--seed",       type=int,   default=42)
+    ap.add_argument("--seed",       type=int,   default=104)
     ap.add_argument("--batch_size", type=int,   default=131072)
     a = ap.parse_args()
 
