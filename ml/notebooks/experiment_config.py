@@ -26,7 +26,7 @@ def _find_repo_root(start: Path) -> Path:
 REPO_ROOT = _find_repo_root(Path(__file__).resolve().parent)
 
 # Seeds & reproducibility
-RANDOM_SEED = int(os.environ.get("RANDOM_SEED", 42))
+RANDOM_SEED = int(os.environ.get("RANDOM_SEED", 104))
 
 # Raw / prepared datasets
 DATA_DIR     = REPO_ROOT / "data"
