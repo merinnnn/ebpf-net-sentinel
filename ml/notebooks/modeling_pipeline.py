@@ -96,14 +96,7 @@ def binary_metrics(y_true: np.ndarray, y_pred: np.ndarray, y_prob: np.ndarray | 
     return metrics
 
 def tune_threshold_on_val(y_val: np.ndarray, y_prob_val: np.ndarray) -> float:
-    """
-    Find the decision threshold that maximises F1 on the validation set.
-
-    This replaces the hardcoded 0.5 default which is almost always suboptimal
-    for imbalanced network-traffic data.
-
-    Returns 0.5 as fallback if there are fewer than 10 positive samples.
-    """
+    """Find the F1-maximising decision threshold on the validation set. Falls back to 0.5 with < 10 positives."""
     n_pos = int((y_val == 1).sum())
     if n_pos < 10:
         return 0.5
@@ -115,11 +108,7 @@ def tune_threshold_on_val(y_val: np.ndarray, y_prob_val: np.ndarray) -> float:
     return float(thresholds[int(np.argmax(f1s))])
 
 def tune_threshold_for_fpr(y_val: np.ndarray, y_prob_val: np.ndarray, target_fpr: float = 0.001) -> float:
-    """
-    Choose the HIGHEST threshold such that FPR <= target_fpr on the validation set.
-    This directly answers the 'false positives reduced' research question.
-    Falls back to 0.5 if val has only one class.
-    """
+    """Choose the highest threshold where FPR <= target_fpr on the validation set. Falls back to 0.5 with one class."""
     if len(np.unique(y_val)) < 2:
         return 0.5
     # roc_curve returns thresholds in decreasing score order
@@ -134,12 +123,7 @@ def tune_threshold_for_fpr(y_val: np.ndarray, y_prob_val: np.ndarray, target_fpr
     return float(thr[int(best)])
 
 def tune_threshold_for_recall(y_val: np.ndarray, y_prob_val: np.ndarray, target_recall: float = 0.40) -> float:
-    """
-    Choose the HIGHEST threshold that still achieves recall >= target_recall on validation.
-
-    This is useful for matched-recall comparisons where the question is whether one
-    feature set can achieve the same recall with fewer false positives.
-    """
+    """Choose the highest threshold that still achieves recall >= target_recall on validation."""
     if len(np.unique(y_val)) < 2:
         return 0.5
     target_recall = float(np.clip(target_recall, 0.0, 1.0))
@@ -178,14 +162,8 @@ def metrics_at_threshold(y_true: np.ndarray, y_score: np.ndarray, threshold: flo
     metrics["threshold"] = float(threshold)
     return metrics
 
-def model_candidates(seed: int = 42) -> Dict[str, Pipeline]:
-    """
-    Candidate models used across notebooks.
-
-    We attempt to stay consistent with the hyperparameters defined in experiment_config.py
-    (RF_PARAMS / HGB_PARAMS) so that "generalisation" notebooks do not accidentally
-    re-train different models than the headline experiments.
-    """
+def model_candidates(seed: int = 104) -> Dict[str, Pipeline]:
+    """Candidate models used across notebooks. Hyperparameters match experiment_config.py for consistency."""
     from ml.notebooks.experiment_config import RF_PARAMS, HGB_PARAMS
     _rf = dict(RF_PARAMS)
     _hgb = dict(HGB_PARAMS)
@@ -289,7 +267,7 @@ def evaluate_candidate(model: Pipeline, X_tr: pd.DataFrame, y_tr: np.ndarray, X_
         "selection_score": score,
     }
 
-def rank_models(X_tr: pd.DataFrame, y_tr: np.ndarray, X_va: pd.DataFrame, y_va: np.ndarray, seed: int = 42):
+def rank_models(X_tr: pd.DataFrame, y_tr: np.ndarray, X_va: pd.DataFrame, y_va: np.ndarray, seed: int = 104):
     rows = []
     fitted = {}
     for name, model in model_candidates(seed).items():
@@ -317,7 +295,7 @@ def bootstrap_metric_ci(
     *,
     metric: str = "roc_auc",
     n_boot: int = 300,
-    seed: int = 42,
+    seed: int = 104,
 ) -> Dict[str, float | None]:
     if len(y_true) == 0:
         return {"mean": None, "low": None, "high": None, "n_boot": 0}
@@ -348,7 +326,7 @@ def bootstrap_metric_ci(
         "n_boot": int(len(arr)),
     }
 
-def load_model_pack(fs_name: str, *, artifact: str = "headline", seed: int = 42) -> dict:
+def load_model_pack(fs_name: str, *, artifact: str = "headline", seed: int = 104) -> dict:
     from ml.notebooks.experiment_config import MODELS_DIR
 
     artifact_map = {
@@ -406,7 +384,7 @@ def fit_model_family_on_split(
     feature_list: List[str] | None,
     model_name: str,
     test_file: str = "test.parquet",
-    seed: int = 42,
+    seed: int = 104,
     threshold_mode: str = "f1",
     target_fpr: float = 0.001,
     target_recall: float | None = None,
