@@ -133,13 +133,8 @@ def load_ebpf_agg(jsonl: str) -> pd.DataFrame:
 
 def detect_replay_scenario(zeek_df: pd.DataFrame, ebpf_df: pd.DataFrame, debug: bool = False):
     """
-    Detect if this is a PCAP replay scenario based on time compression.
-    
-    Returns:
-        tuple: (is_replay, compression_ratio, replay_type)
-            is_replay: bool
-            compression_ratio: float (zeek_span / ebpf_span)
-            replay_type: str ('topspeed', 'fast', 'moderate', 'realtime', 'live')
+    Detect PCAP replay from time compression (Zeek span / eBPF span).
+    Returns (is_replay: bool, compression_ratio: float, replay_type: str).
     """
     zeek_span = zeek_df['end_ts'].max() - zeek_df['start_ts'].min()
     ebpf_span = ebpf_df['last_ts_s'].max() - ebpf_df['first_ts_s'].min()
@@ -215,12 +210,7 @@ def synchronize_timestamps(zeek_df: pd.DataFrame, ebpf_df: pd.DataFrame, debug: 
 
 def match_flows_with_deduplication(zeek_df: pd.DataFrame, ebpf_df: pd.DataFrame, 
                                    is_replay: bool, debug: bool = False):
-    """
-    Match flows with intelligent duplicate handling.
-    
-    For replay scenarios: Uses one-to-one matching to prevent duplicate 5-tuple issues.
-    For live capture: Uses standard merge with time window filtering.
-    """
+    """Match Zeek and eBPF flows on 5-tuple. Replay: one-to-one. Live: standard merge."""
     # Create 5-tuple keys
     zeek_df = zeek_df.copy()
     ebpf_df = ebpf_df.copy()
@@ -302,9 +292,8 @@ def match_flows_with_deduplication(zeek_df: pd.DataFrame, ebpf_df: pd.DataFrame,
         # Live mode: Standard pandas merge
         print("[*] Using standard merge (live capture mode)...")
 
-        # Deduplicate eBPF entries by 5-tuple: keep the record with the most samples
-        # Without this, a single high-throughput TCP flow (e.g. iperf3)  can produce thousands of per-packet
-        # flush entries in ebpf_agg.jsonl, causing a one-to-many join explosion (1 Zeek row × N eBPF entries).
+        # Dedup eBPF by 5-tuple; high-throughput flows (e.g. iperf3) can flush thousands of entries, causing a one-to-many join explosion. 
+        # Keep the entry with the most samples.
         key_cols = ["saddr_u32","daddr_u32","sport","dport","proto"]
         before_dedup = len(ebpf_df)
         if "samples" in ebpf_df.columns:
@@ -366,12 +355,7 @@ def match_flows_with_deduplication(zeek_df: pd.DataFrame, ebpf_df: pd.DataFrame,
     return merged
 
 def apply_time_filter(merged: pd.DataFrame, time_slop: float, is_replay: bool, debug: bool = False):
-    """
-    Apply time window filter intelligently.
-    
-    For replay scenarios with high compression: Skip time filtering (use 5-tuple only).
-    For live/moderate replay: Apply standard time window filter.
-    """
+    """Apply time window filter. Skipped in replay mode (5-tuple only); applied for live capture."""
     # Detect if we have eBPF data
     has_ebpf_col = 'first_ts_s' in merged.columns or 'ebpf_first_ts_s' in merged.columns
     
@@ -426,13 +410,9 @@ def run_merge(
     force_replay_mode: bool = False,
     zeek_df: "pd.DataFrame | None" = None,
 ) -> None:
-    """In-process merge entry point called by the daemon each poll cycle.
-
-    Accepts a pre-loaded (and pre-deduplicated) eBPF DataFrame so the caller
-    can maintain an incremental cache instead of re-reading the full JSONL file.
-    If zeek_df is supplied it is used directly (skipping the file read); otherwise
-    zeek_csv is loaded via load_zeek_conn().
-    Output is written to *out* (same as the CLI --out argument).
+    """
+    In-process merge for the daemon. Accepts a pre-loaded eBPF DataFrame to avoid re-reading JSONL.
+    If zeek_df is provided, skips the CSV read. Output written to *out*.
     """
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
 
@@ -543,8 +523,6 @@ def main():
     
     print(f"[*] Loaded {len(e)} eBPF flows")
 
-    # Detect replay scenario first:
-    # live capture uses Unix wall clock on both sides so timestamp synchronization must be skipped.
     is_replay, compression, replay_type = detect_replay_scenario(z, e, debug=args.debug)
 
     if args.force_replay_mode:
@@ -552,43 +530,34 @@ def main():
         is_replay = True
         replay_type = 'forced'
 
-    # Synchronize timestamps only for replay (PCAP time is not wall clock).
-    # For live capture both Zeek and eBPF already use Unix epoch applying an offset would shift eBPF flows by the 
-    # gap between the earliest host socket event and the first Zeek flow on the capture interface, breaking the join.
+    # Sync timestamps only for replay; live capture uses Unix epoch on both sides already.
     if is_replay:
         print("[*] Synchronizing timestamps (replay mode)...")
         e = synchronize_timestamps(z, e, debug=args.debug)
     else:
         print("[*] Skipping timestamp sync (live capture — both sources use wall clock)")
 
-    # Match flows with appropriate strategy
     merged = match_flows_with_deduplication(z, e, is_replay=is_replay, debug=args.debug)
-
-    # Apply time filter (or skip for replay)
     merged = apply_time_filter(merged, args.time_slop, is_replay=is_replay, debug=args.debug)
 
-    # Helper function for safe column access
     def col(df, name, default):
-        # Try with ebpf_ prefix first
+        # Try ebpf_ prefix first, then bare name.
         if f'ebpf_{name}' in df.columns:
             return df[f'ebpf_{name}']
         if name in df.columns:
             return df[name]
         return pd.Series([default] * len(df), index=df.index)
 
-    # Create standardized output columns
     merged["ebpf_bytes_sent"] = col(merged, "bytes_sent", 0).fillna(0).astype(float)
     merged["ebpf_bytes_recv"] = col(merged, "bytes_recv", 0).fillna(0).astype(float)
     merged["ebpf_retransmits"] = col(merged, "retransmits", 0).fillna(0).astype(float)
     merged["ebpf_state_changes"] = col(merged, "state_changes", 0).fillna(0).astype(float)
     merged["ebpf_samples"] = col(merged, "samples", 0).fillna(0).astype(float)
 
-    # Process context
     merged["ebpf_pid"] = col(merged, "pid_mode", 0).fillna(0).astype(int)
     merged["ebpf_uid"] = col(merged, "uid_mode", 0).fillna(0).astype(int)
     merged["ebpf_comm"] = col(merged, "comm_mode", "").fillna("").astype(str)
 
-    # Add run metadata
     run_meta_cols = []
     if args.run_meta and os.path.exists(args.run_meta):
         try:
@@ -603,7 +572,6 @@ def main():
         except Exception as ex:
             print(f"[!] Failed to read run metadata: {ex}")
 
-    # Select output columns
     out_cols = [
         "ts","duration","orig_h","resp_h","orig_p","resp_p","proto","conn_state",
         "orig_bytes","resp_bytes","orig_pkts","resp_pkts",
@@ -614,13 +582,9 @@ def main():
     ]
     out_cols.extend(run_meta_cols)
 
-    # Filter to columns that exist
     out_cols = [c for c in out_cols if c in merged.columns]
-    
-    # Write output
     merged[out_cols].to_csv(args.out, index=False)
-    
-    # Calculate statistics
+
     total_flows = len(merged)
     enriched_flows = int((merged['ebpf_samples'] > 0).sum())
     flows_with_data = int((merged['ebpf_bytes_sent'] > 0).sum())
@@ -635,7 +599,6 @@ def main():
     print(f"[*] Flows with packet data: {flows_with_data:,} ({data_rate:.1f}%)")
     print(f"[*] Output written to: {args.out}")
     
-    # Debug statistics
     if args.debug and flows_with_data > 0:
         print("\n[DEBUG] eBPF enrichment statistics:")
         print(f"  - Flows with bytes_sent > 0: {flows_with_data:,}")
