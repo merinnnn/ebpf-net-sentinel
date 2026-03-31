@@ -124,18 +124,12 @@ class LivePaths:
 
 PROTO_MAP = {"tcp": 6.0, "udp": 17.0, "icmp": 1.0}
 
-# Maximum eBPF rows to keep in the in-process cache.
-# A SYN flood with unique source ports generates one entry per source port per flush; 
-# at 600k+ entries the DataFrame becomes unwieldy.
-
-# When the cache exceeds this limit we evict the oldest half (by last_ts_s) so that only recent, Zeek-matchable flows are kept.
-# Zeek expires SYN-only flows in 5 s (tcp_attempt_delay), so entries older than ~60 s are stale for joining purposes.
+# Max cached eBPF flow entries. SYN floods can create 600k+ entries; cap prevents DataFrame bloat.
+# Entries older than ~60s are evicted first (Zeek expires SYN-only flows in 5s, so they're stale).
 _MAX_EBPF_CACHE = 50_000
 
-# Threshold multiplier for live-capture domain shift.
-# The models were calibrated on CICIDS2017 *replay* data where attack features (duration, bytes, packets) have different absolute ranges than live captures.
-# Setting SCORE_THRESHOLD_MULTIPLIER < 1.0 makes detection more sensitive.
-# Default 0.1 (10% of the replay-calibrated threshold) works well in practice; override with env var SCORE_THRESHOLD_MULTIPLIER or --score-threshold-multiplier.
+# Scales replay-calibrated thresholds down for live traffic (10% by default).
+# Models were trained on CICIDS2017 replay data whose feature ranges differ from live captures.
 _DEFAULT_THRESHOLD_MULTIPLIER = float(os.environ.get("SCORE_THRESHOLD_MULTIPLIER", "0.1"))
 
 
@@ -153,7 +147,7 @@ class LiveScorer:
         self._load_models()
 
     def _load_pack(self, name: str) -> dict:
-        path = self.repo / "data" / "models" / f"{name}_headline_model_seed42.joblib"
+        path = self.repo / "data" / "models" / f"{name}_headline_model_seed104.joblib"
         if not path.exists():
             raise FileNotFoundError(path)
         pack = joblib.load(path)
@@ -217,11 +211,7 @@ class LiveScorer:
         return payload
 
     def _resolve_exe(self, pid: int, comm: str) -> str:
-        """Best-effort: resolve full executable path via /proc/<pid>/exe.
-
-        Works only while the process is still alive (short-lived processes like curl/wget will be gone by scoring time).
-        Falls back to the kernel comm field (≤16 chars) when the link cannot be read.
-        """
+        """Resolve full exe path via /proc/<pid>/exe. Falls back to comm if the process is already gone."""
         if pid <= 0:
             return comm
         try:
@@ -323,8 +313,7 @@ class LiveScorer:
         new_rows = merged.iloc[start_idx:].copy()
         self.last_scored_rows = total_rows  # advance now so noise-only batches don't repeat
 
-        # Drop multicast/broadcast destinations; 
-        # background noise that the model was never trained on and that produce false ATTACK labels.
+        # Drop multicast/broadcast. Untrained noise that causes false ATTACK labels.
         dst_str = new_rows.get("resp_h", pd.Series(dtype=str)).astype(str)
         noise_mask = dst_str.str.match(
             r"^(2(?:2[4-9]|3\d)\.|255\.255\.255\.255|[Ff][Ff][0-9a-fA-F]{2}:)"
