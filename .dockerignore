@@ -13,7 +13,7 @@ venv
 node_modules
 data
 !data/models/
-!data/models/baseline_headline_model_seed42.joblib
-!data/models/ebpf_headline_model_seed42.joblib
+!data/models/baseline_headline_model_seed104.joblib
+!data/models/ebpf_headline_model_seed104.joblib
 ml
 ml.egg-info
