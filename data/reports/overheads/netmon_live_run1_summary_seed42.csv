@@ -1,2 +1,0 @@
-pid,samples,cpu_percent_mean,cpu_percent_p95,rss_mb_mean,rss_mb_p95,duration_s,interval_s
-263554,60,0.2833333333333333,2.0,50.40859375,50.49609375,60,1.0
