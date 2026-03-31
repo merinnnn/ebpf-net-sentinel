@@ -154,7 +154,7 @@ def main():
         n_estimators=args.n_estimators,
         max_depth=args.max_depth,
         class_weight='balanced' if args.balance_classes else None,
-        random_state=42,
+        random_state=104,
         n_jobs=args.n_jobs,
     )
     rf.fit(X_train, y_train)

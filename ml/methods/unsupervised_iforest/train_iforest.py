@@ -43,15 +43,10 @@ def split_xy_binary(df: pd.DataFrame, use_only_benign_for_train=True):
     """
     For Isolation Forest: train on BENIGN only, test on everything
     """
-    # Convert the labels into the binary format used by the detector.
     y_binary = (df[IS_ATTACK_COL] == 1).astype(int)
-    
-    # Keep the original family labels for the per-attack breakdown.
     y_labels = df[LABEL_COL].astype(str)
     day = df[DAY_COL].astype(str)
-    
-    # Remove label-related columns before we build the feature matrix.
-    X = df.drop(columns=[LABEL_COL, IS_ATTACK_COL, DAY_COL, 
+    X = df.drop(columns=[LABEL_COL, IS_ATTACK_COL, DAY_COL,
                           'label_raw', 'label_time_offset_sec',
                           'label_halfday_shift_sec', 'label_window_pre_slop_sec',
                           'label_window_post_slop_sec'], errors='ignore')
@@ -59,13 +54,9 @@ def split_xy_binary(df: pd.DataFrame, use_only_benign_for_train=True):
     return X, y_binary, y_labels, day
 
 def make_preprocessor(X_train: pd.DataFrame):
-    """Preprocessor for numeric features only (drop categoricals for IF)"""
-    # Isolation Forest works best with numeric inputs, so keep only numeric columns.
-    
-    numeric_cols = [c for c in X_train.columns 
+    """Numeric-only preprocessor for Isolation Forest (categoricals dropped)."""
+    numeric_cols = [c for c in X_train.columns
                     if X_train[c].dtype in ['int64', 'float64', 'int32', 'float32']]
-    
-    # Remove bookkeeping columns that should not be treated as features.
     exclude = ['ts', 'start_ts', 'end_ts', 't_end', 'run_id']
     numeric_cols = [c for c in numeric_cols if c not in exclude]
 
@@ -232,12 +223,10 @@ def main():
         },
     )
 
-    # Load the train, validation, and test splits from disk.
     train_df = pd.read_parquet(os.path.join(args.splits_dir, "train.parquet"))
     val_df   = pd.read_parquet(os.path.join(args.splits_dir, "val.parquet"))
     test_df  = pd.read_parquet(os.path.join(args.splits_dir, "test.parquet"))
 
-    # Split each table into features, binary labels, and family labels.
     X_train, y_train, labels_train, day_train = split_xy_binary(train_df)
     X_val,   y_val,   labels_val,   day_val   = split_xy_binary(val_df)
     X_test,  y_test,  labels_test,  day_test  = split_xy_binary(test_df)
@@ -256,7 +245,6 @@ def main():
     print_feature_summary(numeric_cols, dropped=dropped)
     print(f"  benign_train_rows : {len(X_train_benign):,}")
 
-    # Use the supplied contamination if present; otherwise tune it on validation data.
     if args.contamination is not None:
         chosen_contamination = args.contamination
         tuning_lines = [
@@ -292,7 +280,7 @@ def main():
     print("[*] Training")
     pipe.fit(X_train_benign)
 
-    # Turn the model output into anomaly scores where larger means more anomalous.
+    # Negate decision_function so higher score = more anomalous.
     def get_scores(X):
         return -pipe.decision_function(X)
 
@@ -300,7 +288,6 @@ def main():
     scores_val   = get_scores(X_val)
     scores_test  = get_scores(X_test)
 
-    # Pick the alert threshold from the validation split when possible.
     n_pos_val = int((y_val == 1).sum())
     if n_pos_val >= 10:
         from sklearn.metrics import roc_curve
@@ -314,7 +301,7 @@ def main():
             f"best_val_f1      : {max(f1s):.4f}",
         ]
     else:
-        # Fall back to the top 10 percent of training anomaly scores.
+        # Fallback: use the 90th percentile of training anomaly scores.
         best_thr = float(np.percentile(scores_train, 90))
         threshold_lines = [
             "strategy         : fallback train-score percentile",
@@ -327,30 +314,25 @@ def main():
     y_val_pred   = (scores_val   >= best_thr).astype(int)
     y_test_pred  = (scores_test  >= best_thr).astype(int)
     
-    # Evaluate the fitted model on all three splits.
     train_metrics = evaluate_binary(y_train.to_numpy(), y_train_pred, scores_train)
     val_metrics = evaluate_binary(y_val.to_numpy(), y_val_pred, scores_val)
     test_metrics = evaluate_binary(y_test.to_numpy(), y_test_pred, scores_test)
     print_metrics_block("Train metrics", train_metrics)
     print_metrics_block("Validation metrics", val_metrics)
     print_metrics_block("Test metrics", test_metrics)
-    
-    # Break out the test detections by attack family.
+
     per_attack = per_attack_metrics(labels_test, y_test.to_numpy(), y_test_pred)
     print_per_attack_block("Per-attack detection (test)", per_attack)
-    
-    # Save the confusion matrix as a small report figure.
+
     cm = confusion_matrix(y_test, y_test_pred, labels=[0, 1])
-    cm_png = os.path.join(args.out_reports_dir, 
+    cm_png = os.path.join(args.out_reports_dir,
                            f"{args.run_name}_iforest_confusion.png")
     plot_confusion(cm, ["BENIGN", "ATTACK"], cm_png)
-    
-    # Save the fitted pipeline so the exact preprocessing stays attached to the model.
-    model_path = os.path.join(args.out_models_dir, 
+
+    model_path = os.path.join(args.out_models_dir,
                               f"{args.run_name}_iforest.joblib")
     joblib.dump(pipe, model_path)
-    
-    # Save a JSON summary with metrics and artifact paths.
+
     results = {
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "run_name": args.run_name,
