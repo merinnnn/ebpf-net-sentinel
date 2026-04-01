@@ -1,37 +1,14 @@
 #!/usr/bin/env python3
 """
-Leakage-controlled split by grouping flows on (orig_h, resp_h) and then
-stratifying groups by a dominant label.
+Split 1: leakage diagnostic grouped on (orig_h, resp_h).
+All flows for a host pair stay in the same split, preventing host-identity leakage.
+Dominant label: attack wins over benign if any attack rows exist in the group.
+Two-pass streaming: pass 1 builds the group table, pass 2 writes parquet splits.
 
-Problem this solves:
-- Random row-level splits can leak "host-pair identity" patterns between train/val/test.
-- Grouping by (orig_h, resp_h) keeps each pair entirely in one split.
-
-Dominant label rule (safer than plain mode)
-- If a group contains any attack labels: dominant is the most frequent attack label.
-- Otherwise: dominant is BENIGN.
-
-This avoids groups with mixed benign+attack being labelled BENIGN just because
-BENIGN is the majority.
-
-Implementation
-Two-pass streaming:
-1) Build group table (dominant label + group size) using small in-RAM dicts
-2) Stream rows again and write to Parquet incrementally using group->split mapping
-
-KNOWN LIMITATION
-This split stratifies by *number of groups*, not by row volume per group. 
-If a small number of host-pairs generate the bulk of attack traffic, train gets most 
-attacks while val/test may end up with near-zero attack rows.
-
-Use this split for LEAKAGE DIAGNOSTICS only (research question: "am I memorising host pairs?").
-Use Split 2 for balanced model selection and Split 4 for realistic evaluation.
-
-Outputs:
-- train.parquet
-- val.parquet
-- test.parquet
-- split_report.json
+Limitation: stratification is by group count, not row volume. Val/test may have very few attack rows when attack traffic is concentrated in a few large groups.
+Use this split for leakage diagnostics only.
+Use Split 2/4 for model selection.
+Outputs: train.parquet, val.parquet, test.parquet, split_report.json
 """
 
 import argparse
@@ -60,13 +37,7 @@ def _iter_batches(parquet_path: str, batch_size: int, columns=None):
 
 
 def _dominant_label(s: pd.Series) -> str:
-    """
-    Return the label used to represent one host-pair group during stratification.
-
-    The rule intentionally gives priority to attack labels. This prevents a mixed
-    benign/attack group from being marked BENIGN just because benign rows are the
-    local majority inside that group.
-    """
+    """Return the dominant label for a host-pair group. Attack labels take priority over BENIGN."""
     vc = s.astype(str).value_counts(dropna=False)
     # Scan labels in descending count order and keep the first attack family we see.
     for k, _v in vc.items():
@@ -84,8 +55,7 @@ def build_group_table(in_parquet: str, batch_size: int = 131072) -> pd.DataFrame
       - attack_rows
       - benign_rows
     """
-    # Aggregate group sizes and label composition in small dictionaries so this
-    # step stays memory-safe even on the full merged dataset.
+    # Use small dicts to stay memory-safe on the full dataset.
     key_to_rows: Dict[Tuple[str, str], int] = {}
     key_to_attack: Dict[Tuple[str, str], int] = {}
     key_to_label_counts: Dict[Tuple[str, str], Dict[str, int]] = {}
@@ -95,7 +65,7 @@ def build_group_table(in_parquet: str, batch_size: int = 131072) -> pd.DataFrame
         df[LABEL_COL] = df[LABEL_COL].astype(str)
         df[ATTACK_COL] = pd.to_numeric(df[ATTACK_COL], errors="coerce").fillna(0).astype(int)
 
-        # Count how many rows from this batch belong to each host-pair group.
+        # Count rows per host-pair group for this batch.
         g = df.groupby(list(GROUP_COLS), dropna=False)
         sizes = g.size()
         attacks = g[ATTACK_COL].sum()
@@ -108,7 +78,7 @@ def build_group_table(in_parquet: str, batch_size: int = 131072) -> pd.DataFrame
             k = (str(oh), str(rh))
             key_to_attack[k] = key_to_attack.get(k, 0) + int(a)
 
-        # Track label composition as well so we can compute a dominant label later.
+        # Track label counts per group for dominant-label computation.
         tmp = df.groupby(list(GROUP_COLS) + [LABEL_COL], dropna=False).size()
         for (oh, rh, lab), n in tmp.items():
             k = (str(oh), str(rh))
@@ -123,8 +93,7 @@ def build_group_table(in_parquet: str, batch_size: int = 131072) -> pd.DataFrame
     for k, n_rows in key_to_rows.items():
         label_counts = key_to_label_counts.get(k, {})
         if label_counts:
-            # Reconstruct a tiny weighted label series so the dominant-label helper
-            # can apply the same attack-first rule used elsewhere in the module.
+            # Reconstruct a weighted label series for the dominant-label helper.
             labs = pd.Series(label_counts)
             dom = _dominant_label(pd.Series(np.repeat(list(labs.index), list(labs.values))))
         else:
@@ -151,13 +120,7 @@ def assign_groups_row_weighted(
     test_ratio: float,
     seed: int,
 ) -> Dict[str, List[int]]:
-    """
-    Assign groups to splits with a greedy row-weighted balancing strategy.
-
-    The split is still group-based, but instead of balancing on group count alone
-    this version tries to balance total rows per dominant label. That reduces the
-    chance that one very large host pair dominates a single split.
-    """
+    """Greedy row-weighted group assignment. Balances total rows per label, not just group count."""
     rng = np.random.default_rng(seed)
     grp = grp.reset_index(drop=True)
     grp["_gid"] = grp.index.astype(int)
@@ -175,13 +138,13 @@ def assign_groups_row_weighted(
         }
         remaining = targets.copy()
 
-        # Place the largest groups first because they are the hardest to fit later.
+        # Largest groups first, hardest to fit, so assign them early.
         sub = sub.sort_values("n_rows", ascending=False)
 
         for _, row in sub.iterrows():
             gid = int(row["_gid"])
             w = int(row["n_rows"])
-            # Send the group to the split that is currently furthest below target.
+            # Pick the split furthest below its row target.
             best_splits = sorted(remaining.items(), key=lambda kv: kv[1], reverse=True)
             top = best_splits[0][1]
             cand = [s for s, rem in best_splits if rem == top]
@@ -193,12 +156,7 @@ def assign_groups_row_weighted(
 
 
 def assign_groups_naive_stratified(grp: pd.DataFrame, *, train_ratio: float, val_ratio: float, seed: int):
-    """
-    Assign groups with plain stratified splitting on group counts.
-
-    This preserves the older behavior for comparison and compatibility, but it
-    ignores how many rows each group contributes.
-    """
+    """Stratified group assignment by group count (legacy behavior, ignores row volume)."""
     from sklearn.model_selection import train_test_split
 
     grp = grp.reset_index(drop=True)
@@ -228,22 +186,15 @@ def write_splits_streaming(
     group_assign: Dict[str, List[int]],
     batch_size: int = 131072,
 ):
-    """
-    Stream the source parquet again and write rows into train/val/test outputs.
-
-    Every row is assigned by host-pair lookup, so all rows from the same
-    `(orig_h, resp_h)` group land in the same split.
-    """
+    """Stream source parquet and write rows to train/val/test. All rows for a host pair go to the same split."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    # Build a fast gid -> split lookup from the chosen assignment.
+    # Build fast lookups: gid -> split, and group key -> gid.
     gid_to_split = {}
     for split, gids in group_assign.items():
         for gid in gids:
             gid_to_split[int(gid)] = split
-
-    # Build a second lookup from the raw group key to the synthetic group id.
     key_to_gid = {
         (str(r[GROUP_COLS[0]]), str(r[GROUP_COLS[1]])): int(r["_gid"])
         for r in group_table.reset_index(drop=True).assign(_gid=lambda d: d.index).to_dict(orient="records")
@@ -275,7 +226,7 @@ def write_splits_streaming(
             writers["val"] = _writer("val", schema)
             writers["test"] = _writer("test", schema)
 
-        # Resolve each row to a split by following key -> gid -> split.
+        # Assign each row: key -> gid -> split.
         keys = list(zip(df[GROUP_COLS[0]].tolist(), df[GROUP_COLS[1]].tolist()))
         gids = [key_to_gid.get(k, None) for k in keys]
         splits = [gid_to_split.get(g, "train") if g is not None else "train" for g in gids]
@@ -283,7 +234,6 @@ def write_splits_streaming(
         df["_split"] = splits
 
         for split in ["train", "val", "test"]:
-            # Write only the rows for this split so output files stay append-only.
             part = df[df["_split"] == split].drop(columns=["_split"])
             if len(part):
                 writers[split].write_table(_to_table(part, schema))
@@ -313,23 +263,16 @@ def run(
     train_frac: float = 0.70,
     val_frac: float = 0.15,
     test_frac: float = 0.15,
-    seed: int = 42,
+    seed: int = 104,
     batch_size: int = 131072,
     row_weighted: bool = True,
 ):
-    """
-    Notebook-friendly entry point for the grouped split.
-
-    This builds the group table, chooses an assignment strategy, writes the split
-    files, and stores a compact report next to the outputs.
-    """
+    """Notebook entry point: build group table, assign splits, write parquets and report."""
     if abs((train_frac + val_frac + test_frac) - 1.0) > 1e-6:
         raise ValueError("Fractions must sum to 1.0")
 
-    # Pass 1 builds the compact group table used for all later decisions.
     grp = build_group_table(str(in_parquet), batch_size=batch_size)
     if row_weighted:
-        # The row-weighted mode is the default because it handles large groups better.
         assign = assign_groups_row_weighted(
             grp,
             train_ratio=train_frac,
@@ -338,7 +281,6 @@ def run(
             seed=seed,
         )
     else:
-        # The legacy path keeps older notebook imports working.
         assign = assign_groups_naive_stratified(
             grp,
             train_ratio=train_frac,
@@ -346,7 +288,6 @@ def run(
             seed=seed,
         )
 
-    # Pass 2 rewrites the source rows into their final parquet destinations.
     stats = write_splits_streaming(
         in_parquet=str(in_parquet),
         out_dir=str(out_dir),
@@ -378,7 +319,7 @@ def main():
     ap.add_argument("--train_ratio", type=float, default=0.70)
     ap.add_argument("--val_ratio", type=float, default=0.15)
     ap.add_argument("--test_ratio", type=float, default=0.15)
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--seed", type=int, default=104)
     ap.add_argument("--batch_size", type=int, default=131072)
     ap.add_argument("--row_weighted", type=str, default="true", help="true/false (default true)")
     a = ap.parse_args()

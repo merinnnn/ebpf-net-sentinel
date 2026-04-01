@@ -100,18 +100,9 @@ def _encode_categorical_ebpf(df: pd.DataFrame, ebpf_cols: list,
                               freq_maps: dict | None = None,
                               fit: bool = False) -> tuple:
     """
-    Encode string/categorical eBPF columns (e.g. comm/exe) using frequency
-    encoding (normalised count per category).
-
-    NOTE ON LEAKAGE: When called with fit=True during build_datasets(), the
-    freq_maps are computed from whichever rows are in the current batch of the
-    *full* dataset, not from training rows only. This means the encoded values
-    for Friday test rows may reflect Friday-specific process-name frequencies,
-    introducing subtle leakage into the eBPF categorical features.
-
-    To avoid this, use make_train_aligned_encoding() to compute freq_maps from
-    a training-split parquet only, then pass them here via freq_maps=.
-    See NB04 Experiment 4 for the ablation that tests this correction.
+    Frequency-encode categorical eBPF columns (e.g. comm/exe).
+    When fit=True, freq_maps are fit on all rows, not just training rows, which leaks test-day frequencies.
+    Pass pre-fit freq_maps from make_train_aligned_encoding() to avoid this.
     """
     cat_cols = [c for c in ebpf_cols if c in df.columns
                 and not pd.api.types.is_numeric_dtype(df[c])]
@@ -138,22 +129,8 @@ def make_train_aligned_encoding(
     batch_size: int = 131072,
 ) -> dict:
     """
-    Compute frequency maps for categorical eBPF columns using ONLY the rows in
-    a training-split parquet. Use this instead of the global encoding baked into
-    build_datasets() to avoid train/test leakage.
-
-    Returns a dict {col_name: {category: normalised_freq}} suitable for passing
-    to _encode_categorical_ebpf(..., freq_maps=result, fit=False).
-
-    Usage in notebooks::
-
-        from ml.data_prep.make_datasets import make_train_aligned_encoding
-        train_only_maps = make_train_aligned_encoding(
-            SPLITS_4_EBPF / 'train.parquet', ebpf_cols=['ebpf_comm']
-        )
-        train_df['ebpf_comm'], _ = _encode_categorical_ebpf(
-            train_df, ['ebpf_comm'], freq_maps=train_only_maps, fit=False
-        )
+    Compute frequency maps from a training-split parquet only (leakage-free).
+    Returns {col_name: {category: normalised_freq}} for use with _encode_categorical_ebpf(..., fit=False).
     """
     from collections import Counter
     counters: dict = {}
@@ -283,7 +260,7 @@ def build_datasets(
     if enh_writer:
         enh_writer.close()
 
-    # Persist enough metadata for the notebooks to understand what was written and why.
+    # Write a metadata summary for notebooks.
     meta = {
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "input": str(in_parquet),
