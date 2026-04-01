@@ -60,20 +60,20 @@ Examples:
 
 ```bash
 python3 ml/methods/supervised_rf/train_random_forest.py \
-  --splits_dir data/datasets/split2_balanced_quota_baseline_seed42 \
-  --run_name baseline_rf_split2_seed42 \
+  --splits_dir data/datasets/split2_balanced_quota_baseline_seed104 \
+  --run_name baseline_rf_split2_seed104 \
   --out_models_dir data/models \
   --out_reports_dir data/reports
 
 python3 ml/methods/unsupervised_iforest/train_iforest.py \
-  --splits_dir data/datasets/split2_balanced_quota_baseline_seed42 \
-  --run_name baseline_iforest_split2_seed42 \
+  --splits_dir data/datasets/split2_balanced_quota_baseline_seed104 \
+  --run_name baseline_iforest_split2_seed104 \
   --out_models_dir data/models \
   --out_reports_dir data/reports
 
 python3 ml/deep_learning/train_mlp_binary.py \
-  --splits_dir data/datasets/split2_balanced_quota_baseline_seed42 \
-  --run_name baseline_mlp_split2_seed42 \
+  --splits_dir data/datasets/split2_balanced_quota_baseline_seed104 \
+  --run_name baseline_mlp_split2_seed104 \
   --out_models_dir data/models \
   --out_reports_dir data/reports
 ```
@@ -95,8 +95,8 @@ Use [overheads.py](/mnt/c/Users/merin/Documents/GitHub/ebpf-net-sentinel/ml/benc
 
 ```bash
 python3 ml/benchmarks/overheads.py \
-  --baseline_splits_dir data/datasets/split4_dual_eval_baseline_seed42 \
-  --ebpf_splits_dir     data/datasets/split4_dual_eval_ebpf_seed42 \
+  --baseline_splits_dir data/datasets/split4_dual_eval_baseline_seed104 \
+  --ebpf_splits_dir     data/datasets/split4_dual_eval_ebpf_seed104 \
   --test_file test_realistic \
   --out_json data/reports/rq4_overheads/rq4_overheads.json \
   --out_dir  data/reports/rq4_overheads/artifacts
