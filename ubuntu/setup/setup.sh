@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Update and install base packages
+# Install all host dependencies: base packages, eBPF tooling, Go, bpftool, and Zeek.
+# Usage: bash setup.sh
+
 sudo apt-get update
 sudo apt-get install -y software-properties-common ca-certificates curl gnupg wget
 sudo add-apt-repository -y universe
 sudo apt-get update
 
-# Install eBPF tooling and dependencies
 echo "[*] Installing eBPF tooling and dependencies..."
 sudo apt-get install -y \
   git build-essential clang llvm make pkg-config \
@@ -68,7 +69,7 @@ go version
 
 echo "[*] Base Ubuntu eBPF tooling setup complete."
 
-# Hostname sanity (Postfix can break if hostname contains dot + numeric label like *.04)
+# Postfix (pulled in by Zeek) can break if the hostname contains a dot followed by a numeric label.
 HN="$(hostname)"
 if [[ "$HN" == *.* ]]; then
   echo "[!] Hostname contains a dot ($HN). This can break Postfix/Zeek installs."
@@ -103,8 +104,3 @@ else
 fi
 
 echo "[*] Zeek installation complete."
-
-# Usage
-# bash setup.sh
-# or
-# chmod +x setup.sh && ./setup.sh
