@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Shared console logging helpers for ML training scripts."""
 
-from __future__ import annotations
 
 def print_run_header(
     *,
@@ -22,9 +21,9 @@ def print_run_header(
             print(f"    {key:<18s} {value}")
 
 def print_split_summary(name: str, n_rows: int, n_attack: int) -> None:
-    benign = int(n_rows - n_attack)
+    benign     = int(n_rows - n_attack)
     attack_pct = (100.0 * n_attack / n_rows) if n_rows else 0.0
-    benign_pct = (100.0 * benign / n_rows) if n_rows else 0.0
+    benign_pct = (100.0 * benign   / n_rows) if n_rows else 0.0
     print(f"  {name:<5s}: rows={n_rows:>9,}  benign={benign:>9,} ({benign_pct:>5.1f}%)"
           f"  attack={n_attack:>9,} ({attack_pct:>5.1f}%)")
 
@@ -32,7 +31,7 @@ def print_feature_summary(features: list[str], *, dropped: list[str] | None = No
     print(f"[*] Feature space: {len(features)} numeric features")
     if features:
         preview = ", ".join(features[:10])
-        suffix = " ..." if len(features) > 10 else ""
+        suffix  = " ..." if len(features) > 10 else ""
         print(f"  preview         : {preview}{suffix}")
     if dropped:
         print(f"  dropped_all_nan : {', '.join(dropped)}")
