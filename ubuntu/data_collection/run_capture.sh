@@ -2,22 +2,22 @@
 set -euo pipefail
 
 # Capture pipeline for a single PCAP:
-#   1) Run Zeek over the PCAP and produce zeek/conn.csv
+#   1) Run Zeek over the PCAP to produce zeek/conn.csv
 #   2) Start the eBPF collector (netmon)
-#   3) Replay the PCAP with tcpreplay into a chosen interface
+#   3) Replay the PCAP with tcpreplay
 #   4) Stop netmon and leave all artifacts in data/runs/<timestamp>/
 #
 # Usage:
 #   bash ubuntu/data_collection/run_capture.sh <pcap_name_or_path> <IFACE_CAPTURE> <MBPS|topspeed>
 #
 # Optional env:
-#   REPLAY_IFACE=<iface>     # where tcpreplay sends packets (default: IFACE_CAPTURE)
-#   FLUSH_SECS=5             # netmon flush period seconds (default: 5)
-#   DISABLE_KPROBES=0        # default: 0 (kprobes enabled; set to 1 for XDP/TC-only mode)
-#   MODE=flow                # flow|events|both (default: flow)
-#   SET_MTU=9000             # optional: set MTU for IFACE_CAPTURE and REPLAY_IFACE before replay
-#   FORCE_BUILD=0            # set to 1 to force rebuild netmon + BPF object (make clean all)
-#   PRECHECK_IFACES=1        # default: 1; fail fast if IFACE_CAPTURE/REPLAY_IFACE don't exist
+#   REPLAY_IFACE=<iface>     interface where tcpreplay sends packets (default: IFACE_CAPTURE)
+#   FLUSH_SECS=5             netmon flush period in seconds (default: 5)
+#   DISABLE_KPROBES=0        set to 1 for XDP/TC-only mode (default: 0)
+#   MODE=flow                flow|events|both (default: flow)
+#   SET_MTU=9000             optionally set MTU before replay
+#   FORCE_BUILD=0            set to 1 to force rebuild netmon (make clean all)
+#   PRECHECK_IFACES=1        fail fast if interfaces don't exist (default: 1)
 #
 # Output:
 #   Prints: RUN_DIR=<absolute path>
@@ -69,7 +69,7 @@ TCPREPLAY_META="$RUN_DIR/tcpreplay_meta.json"
 exec > >(tee -a "$DEBUG_LOG") 2>&1
 
 if [[ "$PRECHECK_IFACES" == "1" ]]; then
-  echo "[*] Precheck: validating interfaces exist and are UP"
+  echo "[*] Checking interfaces..."
   if ! ip link show "$IFACE_CAPTURE" >/dev/null 2>&1; then
     echo "[x] IFACE_CAPTURE not found: $IFACE_CAPTURE"
     exit 1
@@ -113,19 +113,17 @@ EOF
 stop_netmon() {
   local pid="${1:-}"
   [[ -z "$pid" ]] && return 0
-
-  # If it already died, we're done.
   if ! sudo kill -0 "$pid" 2>/dev/null; then
     return 0
   fi
 
-  # NOTE: under pipefail, ps can race and fail -> must not kill the whole script.
+  # ps can race under pipefail; suppress errors explicitly.
   local pgid=""
   pgid="$(sudo ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
 
   echo "[*] Stopping netmon pid=$pid pgid=${pgid:-?}"
 
-  # Prefer SIGINT so netmon can flush cleanly.
+  # Prefer SIGINT so netmon can flush cleanly before dying.
   if [[ -n "$pgid" ]]; then
     sudo kill -INT  -- "-$pgid" 2>/dev/null || true
   else
@@ -137,7 +135,6 @@ stop_netmon() {
     sleep 0.3
   done
 
-  # Escalate to TERM.
   if [[ -n "$pgid" ]]; then
     sudo kill -TERM -- "-$pgid" 2>/dev/null || true
   else
@@ -149,7 +146,7 @@ stop_netmon() {
     sleep 0.3
   done
 
-  echo "[!] netmon still alive; SIGKILL"
+  echo "[!] netmon still alive; sending SIGKILL"
   if [[ -n "$pgid" ]]; then
     sudo kill -KILL -- "-$pgid" 2>/dev/null || true
   else
@@ -186,7 +183,7 @@ if command -v editcap >/dev/null 2>&1; then
   PCAP_TO_REPLAY="$FIXED_PCAP"
   echo "[*] Created MTU-safe PCAP: $FIXED_PCAP"
 else
-  echo "[!] editcap not found - using original PCAP (may hit MTU errors)"
+  echo "[!] editcap not found, using original PCAP (may hit MTU errors)"
   PCAP_TO_REPLAY="$PCAP_PATH"
 fi
 
@@ -195,7 +192,7 @@ ZEEK_LOG="$RUN_DIR/zeek.log"
 ZEEK_OUT_DIR="$RUN_DIR/zeek"
 mkdir -p "$ZEEK_OUT_DIR"
 
-echo "  [*] zeek -r $PCAP_PATH (logging -> $ZEEK_LOG)"
+echo "  [*] zeek -r $PCAP_PATH -> $ZEEK_LOG"
 (
   cd "$ZEEK_OUT_DIR"
   zeek -r "$PCAP_PATH" >"$ZEEK_LOG" 2>&1
@@ -234,8 +231,7 @@ if [[ ! -x "$NETMON_BIN" || ! -f "$OBJ" ]]; then
   exit 1
 fi
 
-# Attach socket filter to REPLAY_IFACE (where tcpreplay sends)
-echo "[*]   eBPF socket filter will attach to: $REPLAY_IFACE"
+echo "[*]   eBPF socket filter attaching to: $REPLAY_IFACE"
 
 START_ARGS=(
   -obj "$OBJ"
@@ -256,7 +252,7 @@ sudo bash -c '
   ulimit -l unlimited || true
   exec >>"$1" 2>&1
   shift
-  setsid "$@" </dev/null & # start netmon in a new session -> PID becomes PGID
+  setsid "$@" </dev/null &
   echo $! >"$0"
 ' "$NETMON_PIDFILE" "$NETMON_LOG" "$NETMON_BIN" "${START_ARGS[@]}"
 
@@ -274,19 +270,15 @@ echo "[*]   netmon pid: $NETMON_PID"
 echo "[*] [5/6] Replay PCAP (tcpreplay)"
 TCPREPLAY_LOG="$RUN_DIR/tcpreplay.log"
 
-# Respect caller intent:
-# - MBPS="topspeed" -> --topspeed
-# - MBPS="<number>" -> --mbps <number>
 TCPREPLAY_ARGS=( --intf1 "$REPLAY_IFACE" --stats=1 )
 
 if [[ "$MBPS" == "topspeed" || "$MBPS" == "TOPSPEED" ]]; then
   TCPREPLAY_ARGS+=( --topspeed )
 else
-  # basic numeric check
   if [[ "$MBPS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
     TCPREPLAY_ARGS+=( --mbps "$MBPS" )
   else
-    echo "[x] Invalid MBPS arg: '$MBPS' (use number or 'topspeed')"
+    echo "[x] Invalid MBPS arg: '$MBPS' (use a number or 'topspeed')"
     exit 1
   fi
 fi
@@ -300,10 +292,10 @@ sudo tcpreplay "${TCPREPLAY_ARGS[@]}" "$PCAP_TO_REPLAY" >"$TCPREPLAY_LOG" 2>&1 |
   exit 1
 }
 
-echo "[*] [6/6] Waiting $((FLUSH_SECS + 2))s to allow netmon to flush..."
+echo "[*] [6/6] Waiting $((FLUSH_SECS + 2))s for netmon to flush..."
 sleep "$((FLUSH_SECS + 2))"
 
-echo "[*] Stop netmon (final flush)"
+echo "[*] Stopping netmon"
 stop_netmon "$NETMON_PID"
 
 write_fallback_meta
@@ -312,5 +304,4 @@ sudo chown -R "$(id -u):$(id -g)" "$RUN_DIR" 2>/dev/null || true
 echo "[*] Done."
 echo "  Run folder: $RUN_DIR"
 echo "RUN_DIR=$RUN_DIR"
-echo "  Outputs:"
 ls -lah "$EBPF_AGG" "$EBPF_EVENTS" "$RUN_META" 2>/dev/null || true
