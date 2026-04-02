@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
+
 import argparse
 import csv
 import json
 from pathlib import Path
 
 FIELDS_OUT = [
-    "ts","orig_h","resp_h","orig_p","resp_p","proto","duration",
-    "orig_bytes","resp_bytes","orig_pkts","resp_pkts","conn_state",
+    "ts", "orig_h", "resp_h", "orig_p", "resp_p", "proto", "duration",
+    "orig_bytes", "resp_bytes", "orig_pkts", "resp_pkts", "conn_state",
 ]
 
+# Maps output column names to their dotted keys in Zeek JSON.
 FIELDS_JSON = {
     "ts": "ts",
     "orig_h": "id.orig_h",
@@ -32,12 +34,7 @@ def detect_format(p: Path) -> str:
                 continue
             if s.startswith("{") and s.endswith("}"):
                 return "json"
-            if s.startswith("#fields"):
-                return "tsv"
-            # Zeek TSV can have other headers like #separator, #types, etc.
-            if s.startswith("#"):
-                return "tsv"
-            # If it isn't JSON and doesn't start with #, assume TSV records
+            # TSV logs start with # header lines or are plain delimited records.
             return "tsv"
     return "tsv"
 
@@ -51,9 +48,7 @@ def parse_json(in_path: Path, out_path: Path) -> int:
             if not line:
                 continue
             obj = json.loads(line)
-            row = {}
-            for out_k, zeek_k in FIELDS_JSON.items():
-                row[out_k] = obj.get(zeek_k, "")
+            row = {out_k: obj.get(zeek_k, "") for out_k, zeek_k in FIELDS_JSON.items()}
             w.writerow(row)
             n += 1
     return n
@@ -69,7 +64,6 @@ def parse_tsv(in_path: Path, out_path: Path) -> int:
             if not line:
                 continue
             if line.startswith("#separator"):
-                # example: "#separator \\x09"
                 parts = line.split()
                 if len(parts) >= 2 and parts[1] == "\\x09":
                     sep = "\t"
@@ -79,13 +73,10 @@ def parse_tsv(in_path: Path, out_path: Path) -> int:
                 continue
             if line.startswith("#"):
                 continue
-
-            # Data row
             if fields is None:
                 raise RuntimeError("TSV format detected but no #fields header found.")
             break
 
-    # Re-open and stream properly
     with in_path.open("r", encoding="utf-8", errors="replace") as fin, out_path.open("w", newline="") as fout:
         w = csv.DictWriter(fout, fieldnames=FIELDS_OUT)
         w.writeheader()
@@ -96,18 +87,18 @@ def parse_tsv(in_path: Path, out_path: Path) -> int:
             parts = line.split(sep)
             rec = dict(zip(fields, parts))
             row = {
-                "ts": rec.get("ts",""),
-                "orig_h": rec.get("id.orig_h",""),
-                "resp_h": rec.get("id.resp_h",""),
-                "orig_p": rec.get("id.orig_p",""),
-                "resp_p": rec.get("id.resp_p",""),
-                "proto": rec.get("proto",""),
-                "duration": rec.get("duration",""),
-                "orig_bytes": rec.get("orig_bytes",""),
-                "resp_bytes": rec.get("resp_bytes",""),
-                "orig_pkts": rec.get("orig_pkts",""),
-                "resp_pkts": rec.get("resp_pkts",""),
-                "conn_state": rec.get("conn_state",""),
+                "ts":         rec.get("ts", ""),
+                "orig_h":     rec.get("id.orig_h", ""),
+                "resp_h":     rec.get("id.resp_h", ""),
+                "orig_p":     rec.get("id.orig_p", ""),
+                "resp_p":     rec.get("id.resp_p", ""),
+                "proto":      rec.get("proto", ""),
+                "duration":   rec.get("duration", ""),
+                "orig_bytes": rec.get("orig_bytes", ""),
+                "resp_bytes": rec.get("resp_bytes", ""),
+                "orig_pkts":  rec.get("orig_pkts", ""),
+                "resp_pkts":  rec.get("resp_pkts", ""),
+                "conn_state": rec.get("conn_state", ""),
             }
             w.writerow(row)
             n += 1
