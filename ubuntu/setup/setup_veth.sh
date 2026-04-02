@@ -14,8 +14,8 @@ B="${2:-veth1}"
 MTU="${3:-}"
 
 if ip link show "$A" >/dev/null 2>&1 || ip link show "$B" >/dev/null 2>&1; then
-  echo "[!] $A or $B already exists. Delete them first if you want a clean recreate:"
-  echo "    sudo ip link del $A  # (deleting one end deletes the pair)"
+  echo "[!] $A or $B already exists. Delete them first:"
+  echo "    sudo ip link del $A"
   exit 1
 fi
 
@@ -29,6 +29,6 @@ fi
 ip link set "$A" up
 ip link set "$B" up
 
-echo "[*] Created and brought up: $A <-> $B"
+echo "[*] Created: $A <-> $B"
 ip -s link show "$A" || true
 ip -s link show "$B" || true
