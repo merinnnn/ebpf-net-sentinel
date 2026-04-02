@@ -1,21 +1,18 @@
 #!/usr/bin/env bash
-# Creates:
-#   - Network namespace "ns-research"
-#   - veth pair: ns0 (host side, capture here) <-> ns1 (inside ns-research)
-#   - IP addresses: host=10.99.0.1/24, namespace=10.99.0.2/24
-#   - lo up inside the namespace
+
+# Creates a network namespace and veth pair for isolated traffic generation.
+#
+#   Namespace : ns-research
+#   Host side : ns0  (10.99.0.1/24) # capture here
+#   NS side   : ns1  (10.99.0.2/24) # generate traffic from here
 #
 # Usage:
 #   sudo bash ubuntu/setup/setup_research_net.sh [up|down|status]
 #
 # After running 'up':
-#   - Start the daemon:  sudo bash ubuntu/live/run_live.sh ns0
-#   - Generate traffic:  sudo ip netns exec ns-research <command>
-#       ping 10.99.0.1
-#       iperf3 -c 10.99.0.1
-#       nmap -sS 10.99.0.1
-#       hping3 --flood -S 10.99.0.1
-#       tcpreplay -i ns1 your.pcap   (from host, no netns needed for tcpreplay)
+#   Start daemon : sudo bash ubuntu/live/run_live.sh ns0
+#   Open shell   : sudo ip netns exec ns-research bash
+#   Quick test   : sudo ip netns exec ns-research ping -c3 10.99.0.1
 
 set -euo pipefail
 
@@ -52,7 +49,8 @@ case "$cmd" in
     ip netns exec "$NS" ip link set "$VETH_NS" up
     ip netns exec "$NS" ip link set lo up
 
-    echo "[*] Disabling checksum offloading (required for Zeek to see valid packets)"
+    # Disable offloading so Zeek sees valid checksums on all packets.
+    echo "[*] Disabling checksum offloading"
     ethtool -K "$VETH_HOST" tx off rx off gso off gro off lro off tso off 2>/dev/null || true
     ip netns exec "$NS" ethtool -K "$VETH_NS" tx off rx off gso off gro off lro off tso off 2>/dev/null || true
 
@@ -70,7 +68,7 @@ case "$cmd" in
     echo "[*] Tearing down research network..."
     if ip link show "$VETH_HOST" >/dev/null 2>&1; then
       ip link del "$VETH_HOST"
-      echo "    Deleted veth pair ${VETH_HOST} - ${VETH_NS}"
+      echo "    Deleted veth pair ${VETH_HOST} <-> ${VETH_NS}"
     fi
     if ip netns list | grep -q "^${NS}"; then
       ip netns del "$NS"
