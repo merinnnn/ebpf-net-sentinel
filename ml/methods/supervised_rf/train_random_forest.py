@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Random Forest for Network Anomaly Detection"""
+"""Random Forest for network anomaly detection."""
+
 import argparse, json, os, time, joblib
 import numpy as np
 import pandas as pd
@@ -33,7 +34,7 @@ DROP_COLS = [
 ]
 
 def prepare_data(df):
-    """Extract numeric features only. Uses columns from DROP_COLS exclusion list."""
+    """Extract numeric features. Excludes columns in DROP_COLS."""
     X = df.drop(columns=DROP_COLS, errors='ignore')
     numeric = [c for c in X.columns if pd.api.types.is_numeric_dtype(X[c])
                and not X[c].isna().all()]
@@ -63,16 +64,15 @@ def per_attack(labels, y_true, y_pred):
         mask = (labels == a).to_numpy()
         if mask.sum() == 0:
             continue
-        det = (y_pred[mask] == 1).sum()
+        det  = (y_pred[mask] == 1).sum()
         r[a] = {'count': int(mask.sum()), 'detected': int(det),
                 'detection_rate': float(det / mask.sum())}
     return r
 
 def tune_threshold_on_val(y_val, y_prob_val):
-    """Return threshold that maximises F1 on the validation set."""
+    """Return the threshold that maximises F1 on the validation set."""
     _, _, thresholds = roc_curve(y_val, y_prob_val)
-    f1s = [f1_score(y_val, (y_prob_val >= t).astype(int), zero_division=0)
-           for t in thresholds]
+    f1s  = [f1_score(y_val, (y_prob_val >= t).astype(int), zero_division=0) for t in thresholds]
     best = thresholds[int(np.argmax(f1s))]
     print(f"  Val-tuned threshold: {best:.5f}  (val F1={max(f1s):.4f})")
     return float(best), float(max(f1s))
@@ -98,17 +98,17 @@ def plot_cm(cm, out):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--splits_dir", required=True)
-    p.add_argument("--run_name", required=True)
-    p.add_argument("--out_models_dir", default="data/models")
-    p.add_argument("--out_reports_dir", default="data/reports")
-    p.add_argument("--n_estimators", type=int, default=200)
-    p.add_argument("--max_depth", type=int, default=20)
-    p.add_argument("--n_jobs", type=int, default=1)
-    p.add_argument("--balance_classes", action="store_true", default=True)
+    p.add_argument("--splits_dir",       required=True)
+    p.add_argument("--run_name",         required=True)
+    p.add_argument("--out_models_dir",   default="data/models")
+    p.add_argument("--out_reports_dir",  default="data/reports")
+    p.add_argument("--n_estimators",     type=int,  default=200)
+    p.add_argument("--max_depth",        type=int,  default=20)
+    p.add_argument("--n_jobs",           type=int,  default=1)
+    p.add_argument("--balance_classes",  action="store_true", default=True)
     args = p.parse_args()
 
-    os.makedirs(args.out_models_dir, exist_ok=True)
+    os.makedirs(args.out_models_dir,  exist_ok=True)
     os.makedirs(args.out_reports_dir, exist_ok=True)
 
     print_run_header(
@@ -119,8 +119,8 @@ def main():
         out_reports_dir=args.out_reports_dir,
         params={
             "n_estimators": args.n_estimators,
-            "max_depth": args.max_depth,
-            "n_jobs": args.n_jobs,
+            "max_depth":    args.max_depth,
+            "n_jobs":       args.n_jobs,
             "class_weight": "balanced" if args.balance_classes else "none",
         },
     )
@@ -129,25 +129,24 @@ def main():
     val_df   = pd.read_parquet(f"{args.splits_dir}/val.parquet")
     test_df  = pd.read_parquet(f"{args.splits_dir}/test.parquet")
 
-    X_train_raw, y_train, _          = prepare_data(train_df)
-    X_val_raw,   y_val,   _          = prepare_data(val_df)
+    X_train_raw, y_train, _           = prepare_data(train_df)
+    X_val_raw,   y_val,   _           = prepare_data(val_df)
     X_test_raw,  y_test,  labels_test = prepare_data(test_df)
 
     print("[*] Split sizes")
     print_split_summary("train", len(X_train_raw), int((y_train == 1).sum()))
-    print_split_summary("val", len(X_val_raw), int((y_val == 1).sum()))
-    print_split_summary("test", len(X_test_raw), int((y_test == 1).sum()))
+    print_split_summary("val",   len(X_val_raw),   int((y_val   == 1).sum()))
+    print_split_summary("test",  len(X_test_raw),  int((y_test  == 1).sum()))
 
-    # Fit the imputer on the training split only, then reuse it everywhere else.
-    imputer = SimpleImputer(strategy="median")
-    X_train = imputer.fit_transform(X_train_raw)
-    X_val   = imputer.transform(X_val_raw)
-    X_test  = imputer.transform(X_test_raw)
+    # Fit imputer on training only then reuse for val/test.
+    imputer      = SimpleImputer(strategy="median")
+    X_train      = imputer.fit_transform(X_train_raw)
+    X_val        = imputer.transform(X_val_raw)
+    X_test       = imputer.transform(X_test_raw)
     feature_names = X_train_raw.columns.tolist()
     print_preprocessing_summary("SimpleImputer(median) fitted on train only; no scaling for RF")
     print_feature_summary(feature_names)
 
-    # Train the Random Forest on the prepared training matrix.
     print("[*] Training")
     t0 = time.time()
     rf = RandomForestClassifier(
@@ -161,11 +160,11 @@ def main():
     train_time = time.time() - t0
     print(f"  fit_seconds     : {train_time:.2f}")
 
-    y_val_prob  = rf.predict_proba(X_val)[:, 1]
-    y_test_prob = rf.predict_proba(X_test)[:, 1]
+    y_val_prob   = rf.predict_proba(X_val)[:, 1]
+    y_test_prob  = rf.predict_proba(X_test)[:, 1]
     y_train_prob = rf.predict_proba(X_train)[:, 1]
 
-    # Pick the decision threshold from the validation split.
+    # Choose the decision threshold from the validation split.
     n_pos_val = int((y_val == 1).sum())
     if n_pos_val >= 10:
         best_thr, best_val_f1 = tune_threshold_on_val(y_val.to_numpy(), y_val_prob)
@@ -185,26 +184,26 @@ def main():
     print_tuning_summary("Threshold selection", tuning_lines)
 
     y_train_pred = (y_train_prob >= best_thr).astype(int)
-    y_val_pred   = (y_val_prob  >= best_thr).astype(int)
-    y_test_pred  = (y_test_prob >= best_thr).astype(int)
+    y_val_pred   = (y_val_prob   >= best_thr).astype(int)
+    y_test_pred  = (y_test_prob  >= best_thr).astype(int)
 
     train_m = evaluate(y_train, y_train_pred, y_train_prob)
-    val_m  = evaluate(y_val,   y_val_pred,   y_val_prob)
-    test_m = evaluate(y_test,  y_test_pred,  y_test_prob)
+    val_m   = evaluate(y_val,   y_val_pred,   y_val_prob)
+    test_m  = evaluate(y_test,  y_test_pred,  y_test_prob)
 
-    print_metrics_block("Train metrics", train_m)
+    print_metrics_block("Train metrics",      train_m)
     print_metrics_block("Validation metrics", val_m)
-    print_metrics_block("Test metrics", test_m)
+    print_metrics_block("Test metrics",       test_m)
 
     pa = per_attack(labels_test, y_test.to_numpy(), y_test_pred)
     print_per_attack_block("Per-attack detection (test)", pa)
 
-    cm = confusion_matrix(y_test, y_test_pred)
+    cm     = confusion_matrix(y_test, y_test_pred)
     cm_png = f"{args.out_reports_dir}/{args.run_name}_rf_confusion.png"
     plot_cm(cm, cm_png)
 
-    fi = pd.DataFrame({'feature': feature_names, 'importance': rf.feature_importances_})\
-           .sort_values('importance', ascending=False)
+    fi = (pd.DataFrame({'feature': feature_names, 'importance': rf.feature_importances_})
+            .sort_values('importance', ascending=False))
     print("[*] Top 10 features")
     for _, r in fi.head(10).iterrows():
         print(f"  {r['feature']:30s} {r['importance']:.4f}")
@@ -214,37 +213,33 @@ def main():
                  'threshold': best_thr}, model_path)
 
     results = {
-        'timestamp': datetime.utcnow().isoformat() + "Z",
-        'run_name': args.run_name,
-        'model': 'RandomForest',
+        'timestamp':             datetime.utcnow().isoformat() + "Z",
+        'run_name':              args.run_name,
+        'model':                 'RandomForest',
         'params': {
-            'n_estimators': args.n_estimators,
-            'max_depth': args.max_depth,
-            'n_jobs': args.n_jobs,
-            'class_weight': 'balanced' if args.balance_classes else None,
+            'n_estimators':  args.n_estimators,
+            'max_depth':     args.max_depth,
+            'n_jobs':        args.n_jobs,
+            'class_weight':  'balanced' if args.balance_classes else None,
         },
-        'preprocessing': 'SimpleImputer(median) on train only; no StandardScaler needed for RF',
-        'tuned_threshold': best_thr,
+        'preprocessing':         'SimpleImputer(median) on train only; no StandardScaler needed for RF',
+        'tuned_threshold':       best_thr,
         'training_time_seconds': float(train_time),
-        'features': feature_names,
-        'train': train_m,
-        'validation': val_m,
-        'test': test_m,
-        'per_attack_detection': pa,
-        'feature_importance': fi.head(20).to_dict('records'),
-        'model_path': model_path,
-        'confusion_png': cm_png,
+        'features':              feature_names,
+        'train':                 train_m,
+        'validation':            val_m,
+        'test':                  test_m,
+        'per_attack_detection':  pa,
+        'feature_importance':    fi.head(20).to_dict('records'),
+        'model_path':            model_path,
+        'confusion_png':         cm_png,
     }
 
     summary_path = f"{args.out_reports_dir}/{args.run_name}_rf_summary.json"
     with open(summary_path, "w") as f:
         json.dump(results, f, indent=2)
 
-    print_artifacts(
-        model_path=model_path,
-        summary_path=summary_path,
-        extras={"confpng": cm_png},
-    )
+    print_artifacts(model_path=model_path, summary_path=summary_path, extras={"confpng": cm_png})
 
 if __name__ == "__main__":
     main()
