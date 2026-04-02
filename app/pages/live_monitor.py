@@ -11,8 +11,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-# Repo root
 
+# Resolve the repo root from the env var or by searching parent directories.
 def get_repo_root() -> Path:
     env = os.environ.get("NETSENTINEL_ROOT")
     if env:
@@ -27,20 +27,17 @@ REPO = get_repo_root()
 RUNTIME_STATE_PATH = REPO / "data" / "runtime" / "live_capture_state.json"
 DAEMON_LOG_PATH    = REPO / "data" / "runtime" / "live_capture_launcher.log"
 
-# How many seconds updated_at may be behind before we consider the daemon stalled.
-# The daemon can block in run_sync() (zeek-csv conversion, merge) for ~10-30s per cycle plus poll_secs (3s), so be conservative.
+# Seconds updated_at may lag before the daemon is considered stalled.
+# The daemon can block in run_sync() for ~10-30s per cycle plus poll_secs, so be conservative.
 _STALE_SECS = 90
 
-# Maximum number of graph data-points kept in session state per live session.
+# Maximum graph data-points kept in session state.
 _MAX_GRAPH_POINTS = 50_000
 
-# Bump this string whenever graph-state semantics change. 
-# On hot-reload the existing browser session compares its stored version against this constant;
-# if they differ it clears graph_points and loaded_path so the next render triggers a clean rebuild instead of replaying a stale history.
+# Bump this string when graph-state semantics change so hot-reloads get a clean slate.
 _GRAPH_STATE_VERSION = "v2"
 
 # Design tokens
-
 ACCENT   = "#00d4ff"
 PURPLE   = "#7c3aed"
 GREEN    = "#10b981"
@@ -67,7 +64,6 @@ ATTACK_COLORS = {
 }
 
 # Styles
-
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=Inter:wght@400;500;600;700&display=swap');
@@ -598,8 +594,8 @@ hr { border-color: var(--border) !important; margin: 0 !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# Helper functions
 
+# Runtime state helpers
 def load_runtime_state() -> dict:
     if not RUNTIME_STATE_PATH.exists():
         return {}
@@ -633,9 +629,9 @@ def rank_interface(name: str) -> tuple[int, str]:
     lo = name.lower()
     if lo == "lo":                                              return (100, name)
     if lo == "ns0":                                             return (-1,  name)
-    if lo.startswith(("eno","enp","ens","eth","wlan","wlp")):   return (0,   name)
-    if lo.startswith(("tailscale","tun","tap")):                return (20,  name)
-    if lo.startswith(("docker","br-","veth","virbr")):          return (50,  name)
+    if lo.startswith(("eno","enp","ens","eth","wlan","wlp")):  return (0,   name)
+    if lo.startswith(("tailscale","tun","tap")):               return (20,  name)
+    if lo.startswith(("docker","br-","veth","virbr")):         return (50,  name)
     return (10, name)
 
 def preferred_interface(names: list[str]) -> str:
@@ -730,11 +726,11 @@ def resolve_repo_path(path_str: str) -> Path:
     return p if p.is_absolute() else (REPO / p).resolve()
 
 def _rebase_daemon_path(p_str: str) -> Path:
-    """Rebase an absolute daemon path to the UI's REPO when it doesn't resolve.
+    """
+    Rebase an absolute daemon path to the UI's REPO when it no longer resolves.
 
-    The daemon may have run from a different filesystem root (e.g. a bind-mount such as /opt/netsentinel -> /home/merin/projects/ebpf-net-sentinel 
-    that has since been removed).
-    Both roots share the same relative layout under data/, so we locate the first "data" component and reattach it to REPO.
+    Both roots share the same relative layout under data/, so we locate the first
+    "data" component and reattach everything from there to REPO.
     """
     p = Path(p_str)
     if p.exists():
@@ -886,8 +882,8 @@ def sync_live_source_from_runtime() -> None:
     rt = load_runtime_state()
     if not rt:
         return
-    # Only sync the interface from the daemon when it is actually running.
-    # If the daemon is stopped, leave S.iface alone so the user's sidebar selection isn't overwritten by a stale state file.
+    # Only sync the interface when the daemon is actually running;
+    # otherwise the user's sidebar selection would be overwritten by a stale state file.
     if rt.get("interface") and live_capture_is_running(rt):
         S.iface = rt["interface"]
     rf = resolve_live_event_path(rt)
@@ -899,12 +895,11 @@ def sync_live_source_from_runtime() -> None:
         S.total_anom    = 0
         S.threat_counts = {}
         S.graph_points  = []
-        # Do NOT update S.start_time here; uptime is derived from runtime_state.started_at
     rd = rt.get("run_dir")
     S.run_dir = str(_rebase_daemon_path(rd)) if rd else ""
 
 def _init():
-    rt    = load_runtime_state()
+    rt     = load_runtime_state()
     ifaces = list_interfaces()
     live_path = default_live_event_path()
     defaults = {
@@ -937,9 +932,8 @@ def _init():
         if k not in st.session_state:
             st.session_state[k] = v
 
-    # One-time cleanup after a code change (hot-reload) or on a brand-new session.
-    # If the stored version doesn't match the current constant the browser session is carrying graph_points and loaded_path 
-    # from a previous code version, which may contain historical events that bypass the populate_graph=False fix.
+    # Clear graph state when the stored version doesn't match the current constant.
+    # This handles hot-reloads where graph_points may contain stale history.
     if st.session_state.get("_graph_state_version") != _GRAPH_STATE_VERSION:
         st.session_state["graph_points"]     = []
         st.session_state["loaded_path"]      = ""
@@ -970,6 +964,7 @@ GRAPH_WINDOW_OPTIONS = [
     ("24 hr", 86400),
 ]
 
+# Event parsing and scoring
 def normalise_event(ev: dict) -> dict:
     out = dict(ev)
     if "_ts" not in out:
@@ -995,17 +990,14 @@ def normalise_event(ev: dict) -> dict:
         except (TypeError, ValueError): out["proto"] = str(proto or "TCP").upper()
     return out
 
-
 def read_file_events(path: str, offset: int) -> tuple[list[dict], int]:
     p = resolve_repo_path(path)
     if not p.exists():
-        # File not yet created (daemon starting up).
-        # Preserve the current offset so we don't reset to 0 and re-read from the start once it appears.
+        # Daemon is still starting; preserve offset so we don't rewind to 0 once the file appears.
         return [], offset
     size = p.stat().st_size
     if offset > size:
-        # File was rotated or truncated; rewind to start.
-        offset = 0
+        offset = 0  # file was rotated or truncated
     if offset == size:
         return [], offset
     with open(p, "rb") as f:
@@ -1013,9 +1005,8 @@ def read_file_events(path: str, offset: int) -> tuple[list[dict], int]:
         chunk = f.read()
     if not chunk:
         return [], offset
-    # Only consume bytes up to the last complete newline.
-    # This prevents losing events written at a partial-write boundary: the incomplete trailing bytes
-    # are left for the next poll to pick up once the daemon finishes the line.
+    # Only consume up to the last complete newline so a partial write at the boundary
+    # is left for the next poll rather than dropped.
     last_nl = chunk.rfind(b"\n")
     if last_nl < 0:
         return [], offset
@@ -1050,16 +1041,11 @@ def graph_window_label(window_s: int) -> str:
 
 def chart_bucket_seconds(window_s: int) -> int:
     window_s = int(max(window_s, 1))
-    if window_s <= 120:
-        return 2
-    if window_s <= 300:
-        return 10
-    if window_s <= 900:
-        return 15
-    if window_s <= 3600:
-        return 60
-    if window_s <= 21600:
-        return 300
+    if window_s <= 120:   return 2
+    if window_s <= 300:   return 10
+    if window_s <= 900:   return 15
+    if window_s <= 3600:  return 60
+    if window_s <= 21600: return 300
     return 900
 
 def selected_model_key() -> str:
@@ -1107,7 +1093,7 @@ def uptime_str(start: float) -> str:
     return f"{h:02d}:{m:02d}:{sec:02d}" if h else f"{m:02d}:{sec:02d}"
 
 def daemon_start_epoch(rt: dict) -> float | None:
-    """Parse the daemon's started_at timestamp into a Unix epoch float."""
+    """Parse the daemon's started_at field into a Unix epoch float."""
     raw = (rt or {}).get("started_at")
     if not raw:
         return None
@@ -1120,11 +1106,11 @@ def daemon_start_epoch(rt: dict) -> float | None:
         return None
 
 def rebuild_state_from_file(path: str, populate_graph: bool = True) -> None:
-    """Read the event file from the beginning to rebuild cumulative counters.
+    """
+    Read the event file from the start to rebuild cumulative counters.
 
-    populate_graph=False is used for Live source mode: we still count total flows accurately from the historical file 
-    but deliberately leave graph_points empty so the live time-series starts fresh from "now" without a historical
-    spike on the first render.
+    populate_graph=False is used in Live mode: historical flows are counted for the stat strip 
+    but not loaded into graph_points, so the live chart starts fresh from now without a spike on first render.
     """
     resolved = resolve_repo_path(path)
     if not resolved.exists():
@@ -1172,7 +1158,7 @@ def rebuild_state_from_file(path: str, populate_graph: bool = True) -> None:
     S.total_flows = total_flows
     S.total_anom = total_anom
     S.threat_counts = threat_counts
-    S.graph_points = graph_points  # empty list when populate_graph=False
+    S.graph_points = graph_points
     S.file_offset = int(resolved.stat().st_size)
     S.loaded_path = path
     S.loaded_model = S.model
@@ -1191,7 +1177,6 @@ def ingest(evs: list[dict]):
         except Exception:
             ts_val = float(time.time())
         S.graph_points.append({"ts_s": ts_val, "score": event_score(e)})
-    # Prevent unbounded memory growth during long-running sessions
     if len(S.graph_points) > _MAX_GRAPH_POINTS:
         S.graph_points = S.graph_points[-_MAX_GRAPH_POINTS:]
     S.events = list(reversed(evs[-50:])) + S.events
@@ -1208,8 +1193,8 @@ def build_chart_frame(points: list[dict], window_s: int) -> pd.DataFrame:
     df = df.dropna(subset=["ts_s"])
     if df.empty:
         return pd.DataFrame(columns=["bucket", "pps", "score", "t"])
-    # Anchor the window to NOW so the live graph always shows the last N seconds relative to the current clock, not relative to the most-recent event.  
-    # This prevents a startup spike when rebuild_state_from_file loads historical events whose timestamps all fall within the default 5-minute window.
+    # Anchor the window to now so the live graph always shows the last N seconds
+    # relative to the current clock, preventing a startup spike from historical events.
     end_ts = max(float(df["ts_s"].max()), float(time.time()))
     start_ts = end_ts - float(window_s)
     df = df[df["ts_s"] >= start_ts].copy()
@@ -1223,15 +1208,13 @@ def build_chart_frame(points: list[dict], window_s: int) -> pd.DataFrame:
           .sort_values("bucket")
     )
     out["pps"] = out["flows"] / float(step)
-    # Smooth over a 3-bucket rolling window so batch-delivery spikes (all flows from one daemon poll cycle landing in the same bucket) don't dominate the visual.  
-    # min_periods=1 ensures we still show data at the edges.
+    # 3-bucket rolling average to smooth batch-delivery spikes.
     out["pps_smooth"] = out["pps"].rolling(3, min_periods=1, center=True).mean()
     fmt = "%H:%M:%S" if window_s <= 3600 else "%m-%d %H:%M"
     out["t"] = pd.to_datetime(out["bucket"], unit="s").dt.strftime(fmt)
     return out
 
 # Ingest
-
 runtime_state   = load_runtime_state()
 capture_running = live_capture_is_running(runtime_state)
 iface_options   = list_interfaces()
@@ -1252,8 +1235,8 @@ if (
         or float(S.loaded_threshold) != float(S.threshold)
     )
 ):
-    # In Live mode: count historical flows for the stat strip but do NOT load them into graph_points; 
-    # the live chart should only show new activity from the current session, not a historical replay spike on first render.
+    # In Live mode, count historical flows for the stat strip but skip loading
+    # them into graph_points to avoid a spike on the first render.
     rebuild_state_from_file(S.file_path, populate_graph=(S.source != "Live"))
 
 if S.is_live and S.source in {"Live","File"} and S.file_path:
@@ -1271,8 +1254,8 @@ last_pps   = float(chart_df["pps_smooth"].iloc[-1]) if not chart_df.empty else f
 last_score = float(chart_df["score"].iloc[-1]) if not chart_df.empty else ((sum(event_score(e) for e in new_evs) / len(new_evs)) if new_evs else 0.0)
 last_pps_text = f"{last_pps:.2f}"
 
-# SIDEBAR: controls & settings
 
+# Sidebar
 with st.sidebar:
     st.markdown(
         '<div style="'
@@ -1345,7 +1328,7 @@ with st.sidebar:
     else:
         S.iface = st.text_input("Interface", value=S.iface, placeholder="eth0")
 
-    # Show a Restart button when the running daemon is on a different interface than the one selected in the sidebar.
+    # Show a Restart button when the running daemon is on a different interface than selected.
     running_iface = runtime_state.get("interface", "") if runtime_state else ""
     if capture_running and running_iface and running_iface != S.iface:
         st.warning(f"Daemon is on **{running_iface}**. Restart to switch to **{S.iface}**.")
@@ -1358,9 +1341,8 @@ with st.sidebar:
             st.rerun()
 
     if S.source == "Live":
-        live_path = resolve_live_event_path(runtime_state) or S.file_path or "(waiting)"
         st.markdown(
-            f'<p class="sb-note">Follows <code>ubuntu/live/run_live.sh</code><br></p>',
+            '<p class="sb-note">Follows <code>ubuntu/live/run_live.sh</code><br></p>',
             unsafe_allow_html=True,
         )
     elif S.source == "File":
@@ -1392,8 +1374,7 @@ with st.sidebar:
     selected_window_label = st.selectbox("Graph window", window_labels, index=window_labels.index(current_window_label))
     S.graph_window_s = dict(GRAPH_WINDOW_OPTIONS)[selected_window_label]
 
-# MAIN CONTENT
-
+# Main Content
 # Title banner
 st.markdown(
     '<div style="'
@@ -1434,14 +1415,14 @@ if S.source == "Live":
     elif capture_state == "missing":
         st.warning("No live capture state found. Run `sudo bash ubuntu/live/run_live.sh <iface>` first.")
     elif capture_state == "starting":
-        st.warning(rt_msg or "Live capture is starting…")
+        st.warning(rt_msg or "Live capture is starting...")
     elif capture_state == "stalled":
         age = _state_age_secs(runtime_state) if runtime_state else None
         age_txt = f" (last update {age:.0f}s ago)" if age is not None else ""
         st.warning(
             f"Daemon is running (PID {runtime_state.get('pid')}) but its state file "
             f"has not been updated for over {_STALE_SECS}s{age_txt}. "
-            "The daemon may be blocked in a long conversion step — check "
+            "The daemon may be blocked in a long conversion step. Check "
             "`data/runtime/live_capture_daemon.log` for details."
         )
     if capture_state == "running" and runtime_event_path:
@@ -1453,9 +1434,8 @@ if S.source == "Live":
 # Body
 st.markdown('<div class="ns-body">', unsafe_allow_html=True)
 
-# Stat strip
-# Derive uptime from the daemon's own started_at timestamp so it reflects how long the monitoring backend has actually been running, 
-# not how long the page or webapp session has been open.
+# Stat strip. Uptime is derived from the daemon's started_at so it reflects
+# how long the backend has been running, not just the browser session.
 _daemon_epoch  = daemon_start_epoch(runtime_state)
 _uptime_source = "daemon uptime" if _daemon_epoch is not None else "page uptime"
 _uptime_epoch  = _daemon_epoch if _daemon_epoch is not None else S.start_time
@@ -1492,7 +1472,7 @@ with col_ts:
     if not chart_df.empty:
         df_ts = chart_df
         fig = go.Figure()
-        # Raw per-bucket rate as a dim background area
+        # Dim background area showing the raw per-bucket rate.
         fig.add_trace(go.Scatter(
             x=df_ts["t"], y=df_ts["pps"],
             name="Flows/s (raw)",
@@ -1501,7 +1481,7 @@ with col_ts:
             fillcolor="rgba(0,212,255,0.04)",
             hovertemplate="%{x}  Raw: %{y:.2f}<extra></extra>",
         ))
-        # 3-bucket rolling average as the prominent line
+        # 3-bucket rolling average as the prominent line.
         fig.add_trace(go.Scatter(
             x=df_ts["t"], y=df_ts["pps_smooth"],
             name="Flows/s",
@@ -1542,7 +1522,7 @@ with col_ts:
         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
     else:
         st.markdown('<div class="ns-empty-state" style="height:440px;">No data in selected time window</div>', unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)  # panel
+    st.markdown('</div>', unsafe_allow_html=True)
 
 with col_dist:
     total_threat = sum(S.threat_counts.values())
@@ -1602,7 +1582,7 @@ with col_dist:
     else:
         st.markdown('<div class="ns-empty-state" style="height:280px;">No data yet</div>', unsafe_allow_html=True)
 
-    st.markdown('</div>', unsafe_allow_html=True)  # panel
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # Event stream
 display_evs = S.events
@@ -1687,7 +1667,7 @@ else:
         unsafe_allow_html=True,
     )
 
-st.markdown('</div>', unsafe_allow_html=True)  # panel (event stream)
+st.markdown('</div>', unsafe_allow_html=True)
 
 # eBPF probe status
 probe_statuses = runtime_probe_status(runtime_state)
@@ -1709,7 +1689,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Session info + Live diagnostics
+# Session info and live diagnostics
 session_pairs = [
     ("Interface", S.iface or "(none)",                              "info-pill"),
     ("Model",     S.model,                                          ""),
@@ -1739,18 +1719,18 @@ if S.source == "Live":
     state_age     = _state_age_secs(runtime_state) if runtime_state else None
     state_age_txt = f"{state_age:.0f}s ago" if state_age is not None else "unknown"
     diag_pairs = [
-        ("State age",            state_age_txt),
-        ("Runtime msg",          str(runtime_state.get("message", ""))),
-        ("Scoring",              str(runtime_state.get("scoring_message", runtime_state.get("scoring_enabled", "unknown")))),
-        ("Live file",            resolved_live_path or "(none)"),
-        ("Scored exists",        "yes" if scored_path and Path(scored_path).exists() else "no"),
-        ("Scored lines",         f"{file_line_count(scored_path):,}"),
-        ("Raw exists",           "yes" if raw_path and Path(raw_path).exists() else "no"),
-        ("Raw lines",            f"{file_line_count(raw_path):,}"),
-        ("Merged exists",        "yes" if merged_path and Path(merged_path).exists() else "no"),
-        ("Merged lines",         f"{file_line_count(merged_path):,}"),
-        ("UI file",              S.file_path or "(none)"),
-        ("UI file lines",        f"{file_line_count(S.file_path):,}" if S.file_path else "0"),
+        ("State age",     state_age_txt),
+        ("Runtime msg",   str(runtime_state.get("message", ""))),
+        ("Scoring",       str(runtime_state.get("scoring_message", runtime_state.get("scoring_enabled", "unknown")))),
+        ("Live file",     resolved_live_path or "(none)"),
+        ("Scored exists", "yes" if scored_path and Path(scored_path).exists() else "no"),
+        ("Scored lines",  f"{file_line_count(scored_path):,}"),
+        ("Raw exists",    "yes" if raw_path and Path(raw_path).exists() else "no"),
+        ("Raw lines",     f"{file_line_count(raw_path):,}"),
+        ("Merged exists", "yes" if merged_path and Path(merged_path).exists() else "no"),
+        ("Merged lines",  f"{file_line_count(merged_path):,}"),
+        ("UI file",       S.file_path or "(none)"),
+        ("UI file lines", f"{file_line_count(S.file_path):,}" if S.file_path else "0"),
     ]
     diag_html = "".join(
         f'<div class="info-row">'
@@ -1773,15 +1753,15 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.markdown('</div>', unsafe_allow_html=True)  # ns-body
+st.markdown('</div>', unsafe_allow_html=True)
 
 # Auto-refresh
 should_refresh = False
 if S.is_live:
     if S.source == "Live":
-        # Refresh whenever the daemon is active (running, starting, or stalled) so that sync_live_source_from_runtime() 
-        # can pick up new file paths, and so that stall / recovery transitions are detected promptly.
-        # Do NOT require S.file_path; it may be empty while the daemon is starting and the events file has not been created yet.
+        # Refresh when the daemon is active so sync_live_source_from_runtime() can
+        # pick up new file paths and stall/recovery transitions are detected promptly.
+        # S.file_path may be empty while the daemon is starting up.
         in_transition = (time.time() - (S.last_action_time or 0)) < 12
         should_refresh = capture_state in {"running", "starting", "stalled"} or in_transition
     elif S.source == "File":
