@@ -1215,8 +1215,6 @@ def build_chart_frame(points: list[dict], window_s: int) -> pd.DataFrame:
     return out
 
 # Ingest
-runtime_state   = load_runtime_state()
-capture_running = live_capture_is_running(runtime_state)
 iface_options   = list_interfaces()
 
 new_evs: list[dict] = []
@@ -1224,6 +1222,7 @@ runtime_state = load_runtime_state()
 if S.source == "Live":
     sync_live_source_from_runtime()
     runtime_state = load_runtime_state()
+capture_running = live_capture_is_running(runtime_state)
 
 if (
     S.source in {"Live", "File"}
@@ -1285,13 +1284,13 @@ with st.sidebar:
     sb_c1, sb_c2 = st.columns(2)
     with sb_c1:
         if st.button("Start", disabled=capture_running, use_container_width=True):
-            ok, msg = start_live_capture(S.iface)
+            _, msg = start_live_capture(S.iface)
             S.capture_feedback = msg
             S.last_action_time = time.time()
             st.rerun()
     with sb_c2:
         if st.button("Stop", disabled=not capture_running, use_container_width=True):
-            ok, msg = stop_live_capture()
+            _, msg = stop_live_capture()
             S.capture_feedback = msg
             S.last_action_time = time.time()
             st.rerun()
@@ -1335,7 +1334,7 @@ with st.sidebar:
         if st.button("Restart on selected interface", use_container_width=True):
             stop_live_capture()
             time.sleep(0.5)
-            ok, msg = start_live_capture(S.iface)
+            _, msg = start_live_capture(S.iface)
             S.capture_feedback = msg
             S.autostart_attempted = True
             st.rerun()
@@ -1470,11 +1469,10 @@ with col_ts:
         unsafe_allow_html=True,
     )
     if not chart_df.empty:
-        df_ts = chart_df
         fig = go.Figure()
         # Dim background area showing the raw per-bucket rate.
         fig.add_trace(go.Scatter(
-            x=df_ts["t"], y=df_ts["pps"],
+            x=chart_df["t"], y=chart_df["pps"],
             name="Flows/s (raw)",
             line=dict(color="rgba(0,212,255,0.25)", width=0.8),
             fill="tozeroy",
@@ -1483,13 +1481,13 @@ with col_ts:
         ))
         # 3-bucket rolling average as the prominent line.
         fig.add_trace(go.Scatter(
-            x=df_ts["t"], y=df_ts["pps_smooth"],
+            x=chart_df["t"], y=chart_df["pps_smooth"],
             name="Flows/s",
             line=dict(color=ACCENT, width=2.2),
             hovertemplate="%{x}  Flows/s: %{y:.2f}<extra></extra>",
         ))
         fig.add_trace(go.Scatter(
-            x=df_ts["t"], y=df_ts["score"],
+            x=chart_df["t"], y=chart_df["score"],
             name="Avg score",
             line=dict(color=RED, width=1.4, dash="dot"),
             yaxis="y2",
@@ -1559,12 +1557,9 @@ with col_dist:
         )
         st.plotly_chart(fig_pie, use_container_width=True, config={"displayModeBar": False})
 
-    if S.threat_counts:
-        df_th2 = (pd.DataFrame(list(S.threat_counts.items()), columns=["Label","Count"])
-                    .sort_values("Count", ascending=False))
-        total_d = df_th2["Count"].sum()
+        total_d = df_th["Count"].sum()
         rows = ""
-        for _, row in df_th2.head(8).iterrows():
+        for _, row in df_th.head(8).iterrows():
             col  = ATTACK_COLORS.get(row["Label"], DIM)
             pct  = row["Count"] / total_d * 100 if total_d > 0 else 0
             rows += (
