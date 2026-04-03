@@ -163,7 +163,6 @@ def write_split(
     meta = json.loads((out / "split_report.json").read_text())
     return {
         **meta,
-        "meta":  meta,
         "paths": {
             "train":          str(out / "train.parquet"),
             "val":            str(out / "val.parquet"),
