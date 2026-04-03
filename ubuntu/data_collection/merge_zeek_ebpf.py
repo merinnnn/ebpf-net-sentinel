@@ -360,6 +360,15 @@ def apply_time_filter(merged: pd.DataFrame, time_slop: float, is_replay: bool, d
 
     return merged[valid].copy()
 
+
+def _col(df, name, default):
+    if f"ebpf_{name}" in df.columns:
+        return df[f"ebpf_{name}"]
+    if name in df.columns:
+        return df[name]
+    return pd.Series([default] * len(df), index=df.index)
+
+
 def run_merge(
     zeek_csv: "str | None",
     ebpf_df: "pd.DataFrame",
@@ -405,13 +414,6 @@ def run_merge(
 
     merged = match_flows_with_deduplication(z, e, is_replay=is_replay, debug=debug)
     merged = apply_time_filter(merged, time_slop, is_replay=is_replay, debug=debug)
-
-    def _col(df, name, default):
-        if f"ebpf_{name}" in df.columns:
-            return df[f"ebpf_{name}"]
-        if name in df.columns:
-            return df[name]
-        return pd.Series([default] * len(df), index=df.index)
 
     merged["ebpf_bytes_sent"]    = _col(merged, "bytes_sent",    0).fillna(0).astype(float)
     merged["ebpf_bytes_recv"]    = _col(merged, "bytes_recv",    0).fillna(0).astype(float)
@@ -499,22 +501,14 @@ def main():
     merged = match_flows_with_deduplication(z, e, is_replay=is_replay, debug=args.debug)
     merged = apply_time_filter(merged, args.time_slop, is_replay=is_replay, debug=args.debug)
 
-    def col(df, name, default):
-        # Try the ebpf_ prefix first, then the bare column name.
-        if f"ebpf_{name}" in df.columns:
-            return df[f"ebpf_{name}"]
-        if name in df.columns:
-            return df[name]
-        return pd.Series([default] * len(df), index=df.index)
-
-    merged["ebpf_bytes_sent"]    = col(merged, "bytes_sent",    0).fillna(0).astype(float)
-    merged["ebpf_bytes_recv"]    = col(merged, "bytes_recv",    0).fillna(0).astype(float)
-    merged["ebpf_retransmits"]   = col(merged, "retransmits",   0).fillna(0).astype(float)
-    merged["ebpf_state_changes"] = col(merged, "state_changes", 0).fillna(0).astype(float)
-    merged["ebpf_samples"]       = col(merged, "samples",       0).fillna(0).astype(float)
-    merged["ebpf_pid"]           = col(merged, "pid_mode",      0).fillna(0).astype(int)
-    merged["ebpf_uid"]           = col(merged, "uid_mode",      0).fillna(0).astype(int)
-    merged["ebpf_comm"]          = col(merged, "comm_mode",    "").fillna("").astype(str)
+    merged["ebpf_bytes_sent"]    = _col(merged, "bytes_sent",    0).fillna(0).astype(float)
+    merged["ebpf_bytes_recv"]    = _col(merged, "bytes_recv",    0).fillna(0).astype(float)
+    merged["ebpf_retransmits"]   = _col(merged, "retransmits",   0).fillna(0).astype(float)
+    merged["ebpf_state_changes"] = _col(merged, "state_changes", 0).fillna(0).astype(float)
+    merged["ebpf_samples"]       = _col(merged, "samples",       0).fillna(0).astype(float)
+    merged["ebpf_pid"]           = _col(merged, "pid_mode",      0).fillna(0).astype(int)
+    merged["ebpf_uid"]           = _col(merged, "uid_mode",      0).fillna(0).astype(int)
+    merged["ebpf_comm"]          = _col(merged, "comm_mode",    "").fillna("").astype(str)
 
     run_meta_cols = []
     if args.run_meta and os.path.exists(args.run_meta):
