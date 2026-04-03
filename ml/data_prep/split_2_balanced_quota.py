@@ -19,7 +19,6 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
-import pyarrow as pa
 import pyarrow.parquet as pq
 
 LABEL_COL   = "label_family"
