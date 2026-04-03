@@ -2,17 +2,13 @@
 """
 Builds a balanced-core dataset then splits it stratified 70/15/15.
 
-This split is not leakage-controlled by design: it's for clean, readable
-confusion matrices / macro-F1 comparisons under balanced class proportions.
-Use Split 1 for leakage control.
+Intended for clean confusion matrices and macro-F1 comparisons under balanced
+class proportions. Not leakage-controlled by design; use Split 1 for that.
 
-Key features
-- Memory-safe: streams Parquet in batches (does not load the full dataset).
-- Sampling uses per-class reservoir sampling so RAM ~= O(quota x num_classes).
+Memory-safe: streams Parquet in batches with per-class reservoir sampling
+so RAM stays proportional to quota x num_classes, not dataset size.
 
-Output
-Writes:
-  train.parquet, val.parquet, test.parquet, split_report.json
+Outputs: train.parquet, val.parquet, test.parquet, split_report.json
 """
 
 import argparse
@@ -30,25 +26,20 @@ LABEL_COL   = "label_family"
 BENIGN_LIKE = frozenset({"BENIGN", "Unknown", "nan", "NaN", ""})
 
 
-# API used by notebooks
 def run(
     *,
     in_parquet: str,
     out_dir: str,
-    quota: int = 5000,
+    quota: int        = 5000,
     benign_ratio: float = 1.0,
-    equal: bool = False,
+    equal: bool       = False,
     train_frac: float = 0.70,
-    val_frac: float = 0.15,
-    test_frac: float = 0.15,
-    seed: int = 104,
-    batch_size: int = 131072,
+    val_frac: float   = 0.15,
+    test_frac: float  = 0.15,
+    seed: int         = 104,
+    batch_size: int   = 131072,
 ):
-    """
-    Entry point used by notebooks (in-process).
-
-    Writes train/val/test.parquet + split_report.json into out_dir and returns Path(out_dir).
-    """
+    """Notebook entry point. Writes train/val/test.parquet + split_report.json."""
     return write_split(
         in_parquet=str(in_parquet),
         out_dir=str(out_dir),
@@ -70,12 +61,7 @@ def load_report(out_dir: str):
 
 
 def _reservoir_update(res, k, row_dict, seen, rng):
-    """
-    Keep a uniform random sample of size `k` from a streaming source.
-
-    This lets the split builder downsample classes without ever materializing
-    the full class in memory.
-    """
+    """Maintain a uniform reservoir sample of size k from a streaming sequence."""
     seen += 1
     if k <= 0:
         return res, seen
@@ -96,21 +82,19 @@ def _iter_batches(parquet_path: str, batch_size: int, columns=None):
 def _build_meta(seed, parts, **extra):
     """Assemble the report metadata shared by the CLI and notebook entry points."""
     total = sum(len(v) for v in parts.values())
-    atk   = {s: int((~parts[s][LABEL_COL].astype(str).isin(BENIGN_LIKE)).sum())
-             for s in parts}
+    atk   = {s: int((~parts[s][LABEL_COL].astype(str).isin(BENIGN_LIKE)).sum()) for s in parts}
     tr    = set(parts["train"][LABEL_COL].astype(str).unique()) - BENIGN_LIKE
     va    = set(parts["val"][LABEL_COL].astype(str).unique())   - BENIGN_LIKE
     te    = set(parts["test"][LABEL_COL].astype(str).unique())  - BENIGN_LIKE
-    unseen = sorted(te - tr)
     return {
-        "protocol": "split_2_balanced_quota_streaming",
-        "seed": seed,
-        "rows_total": int(total),
-        "attack_rows": atk,
+        "protocol":              "split_2_balanced_quota_streaming",
+        "seed":                  seed,
+        "rows_total":            int(total),
+        "attack_rows":           atk,
         "train_attack_families": sorted(tr),
-        "val_attack_families": sorted(va),
-        "test_attack_families": sorted(te),
-        "unseen_in_train": unseen,
+        "val_attack_families":   sorted(va),
+        "test_attack_families":  sorted(te),
+        "unseen_in_train":       sorted(te - tr),
         **extra,
     }
 
@@ -125,8 +109,8 @@ def make_report(parts: dict) -> dict:
 
 def _collapse_rare_for_stratify(y: pd.Series, min_count: int = 2, other: str = "RARE") -> pd.Series:
     """Collapse ultra-rare classes so stratified splitting does not crash."""
-    y = y.astype(str)
-    vc = y.value_counts(dropna=False)
+    y   = y.astype(str)
+    vc  = y.value_counts(dropna=False)
     rare = set(vc[vc < min_count].index.tolist())
     if not rare:
         return y
@@ -143,7 +127,7 @@ def _can_stratify(y: pd.Series, min_count: int = 2) -> bool:
 
 
 def _safe_train_test_split(df: pd.DataFrame, *, test_size: float, seed: int, y: pd.Series):
-    """Best-effort stratification with robust fallback for tiny datasets."""
+    """Best-effort stratification with fallback for tiny datasets."""
     if len(df) == 0:
         return df.copy(), df.copy()
     if len(df) == 1:
@@ -155,42 +139,41 @@ def _safe_train_test_split(df: pd.DataFrame, *, test_size: float, seed: int, y: 
     try:
         return train_test_split(df, test_size=test_size, random_state=seed, stratify=strat)
     except ValueError:
-        # When stratification still fails, fall back to a deterministic shuffle split.
-        n = len(df)
-        n_test = int(round(float(test_size) * n))
-        n_test = max(1, min(n - 1, n_test))
-        rng = np.random.default_rng(seed)
-        idx = np.arange(n)
+        n       = len(df)
+        n_test  = max(1, min(n - 1, int(round(float(test_size) * n))))
+        rng     = np.random.default_rng(seed)
+        idx     = np.arange(n)
         rng.shuffle(idx)
-        te_idx = idx[:n_test]
-        tr_idx = idx[n_test:]
-        return df.iloc[tr_idx].copy(), df.iloc[te_idx].copy()
+        return df.iloc[idx[n_test:]].copy(), df.iloc[idx[:n_test]].copy()
 
-def run_streaming(in_parquet: str,
-                  quota: int = 5000,
-                  benign_ratio: float = 1.0,
-                  equal: bool = False,
-                  train_frac: float = 0.70,
-                  val_frac: float = 0.15,
-                  test_frac: float = 0.15,
-                  seed: int = 104,
-                  batch_size: int = 131072) -> dict:
+
+def run_streaming(
+    in_parquet: str,
+    quota: int        = 5000,
+    benign_ratio: float = 1.0,
+    equal: bool       = False,
+    train_frac: float = 0.70,
+    val_frac: float   = 0.15,
+    test_frac: float  = 0.15,
+    seed: int         = 104,
+    batch_size: int   = 131072,
+) -> dict:
     """
-    Build the balanced-core sample in streaming mode and split it into train/val/test.
+    Build the balanced-core sample in streaming mode and split into train/val/test.
 
-    The dataset is first quota-capped per attack family, then BENIGN is sampled to
-    the requested ratio, and only then is the balanced core split stratified.
+    Dataset is quota-capped per attack family, BENIGN is sampled to the requested
+    ratio, then the balanced core is split stratified.
     """
     assert abs(train_frac + val_frac + test_frac - 1.0) < 1e-9
 
     rng = np.random.default_rng(seed)
 
-    # Pass 1 only counts rows per family so we can decide the sampling targets.
+    # Pass 1: count rows per family.
     counts = {}
     benign_count = 0
     for df in _iter_batches(in_parquet, batch_size, columns=[LABEL_COL]):
         labels = df[LABEL_COL].astype(str)
-        vc = labels.value_counts(dropna=False)
+        vc     = labels.value_counts(dropna=False)
         for lab, n in vc.items():
             lab = str(lab)
             if lab in BENIGN_LIKE:
@@ -210,38 +193,28 @@ def run_streaming(in_parquet: str,
     print(f"  BENIGN ratio      : {benign_ratio:.1f}x  (benign = ratio x total_attack_rows)")
     print()
 
-    # Convert the requested policy into concrete sample sizes for each class.
     target = {}
     for fam in fams:
-        if equal:
-            target[fam] = min(eff_q, counts[fam])
-        else:
-            target[fam] = min(quota, counts[fam])
+        target[fam] = min(eff_q, counts[fam]) if equal else min(quota, counts[fam])
 
     total_attack_target = sum(target.values())
     target_benign = min(int(benign_ratio * total_attack_target), benign_count)
 
-    # Pass 2 runs reservoir sampling so each family reaches its target size.
+    # Pass 2: reservoir sampling.
     reservoirs = {fam: [] for fam in fams}
-    seen = {fam: 0 for fam in fams}
-    benign_res = []
+    seen       = {fam: 0 for fam in fams}
+    benign_res  = []
     benign_seen = 0
 
-    # Keep all columns because the output split parquets should match the source schema.
-    cols = None
-    for df in _iter_batches(in_parquet, batch_size, columns=cols):
+    for df in _iter_batches(in_parquet, batch_size, columns=None):
         labels = df[LABEL_COL].astype(str)
 
-        # BENIGN is sampled to a ratio relative to the attack total.
         if target_benign > 0:
             ben = df[labels == "BENIGN"]
             if len(ben):
                 for row in ben.to_dict(orient="records"):
-                    benign_res, benign_seen = _reservoir_update(
-                        benign_res, target_benign, row, benign_seen, rng
-                    )
+                    benign_res, benign_seen = _reservoir_update(benign_res, target_benign, row, benign_seen, rng)
 
-        # Each attack family is sampled independently to its own target.
         for fam in fams:
             k = target[fam]
             if k <= 0:
@@ -249,9 +222,7 @@ def run_streaming(in_parquet: str,
             sub = df[labels == fam]
             if len(sub):
                 for row in sub.to_dict(orient="records"):
-                    reservoirs[fam], seen[fam] = _reservoir_update(
-                        reservoirs[fam], k, row, seen[fam], rng
-                    )
+                    reservoirs[fam], seen[fam] = _reservoir_update(reservoirs[fam], k, row, seen[fam], rng)
 
     parts = []
     for fam in fams:
@@ -262,36 +233,26 @@ def run_streaming(in_parquet: str,
     print(f"    {'BENIGN':<22s}  have={benign_count:>7,}  take={len(benign_res):>6,}  (ratio {benign_ratio:.1f}x)")
 
     parts.append(pd.DataFrame(benign_res))
-
     balanced = pd.concat(parts, ignore_index=True)
     balanced[LABEL_COL] = balanced[LABEL_COL].astype(str)
 
-    # Split the balanced core into train first, then divide the remainder into val/test.
-    y = balanced[LABEL_COL].astype(str)
-    train_df, temp_df = _safe_train_test_split(
-        balanced,
-        test_size=(1 - train_frac),
-        seed=seed,
-        y=y,
-    )
-    y_temp = temp_df[LABEL_COL].astype(str)
+    y        = balanced[LABEL_COL].astype(str)
+    train_df, temp_df = _safe_train_test_split(balanced, test_size=(1 - train_frac), seed=seed, y=y)
+    y_temp   = temp_df[LABEL_COL].astype(str)
     val_size = val_frac / (val_frac + test_frac)
-    val_df, test_df = _safe_train_test_split(
-        temp_df,
-        test_size=(1 - val_size),
-        seed=seed,
-        y=y_temp,
-    )
+    val_df, test_df = _safe_train_test_split(temp_df, test_size=(1 - val_size), seed=seed, y=y_temp)
 
-    out_parts = {"train": train_df.reset_index(drop=True),
-                 "val":   val_df.reset_index(drop=True),
-                 "test":  test_df.reset_index(drop=True)}
+    out_parts = {
+        "train": train_df.reset_index(drop=True),
+        "val":   val_df.reset_index(drop=True),
+        "test":  test_df.reset_index(drop=True),
+    }
 
     meta = _build_meta(seed, out_parts,
-                      quota=int(quota), equal=bool(equal),
-                      benign_ratio=float(benign_ratio),
-                      targets={**{k:int(v) for k,v in target.items()}, "BENIGN": int(target_benign)},
-                      batch_size=int(batch_size))
+                       quota=int(quota), equal=bool(equal),
+                       benign_ratio=float(benign_ratio),
+                       targets={**{k: int(v) for k, v in target.items()}, "BENIGN": int(target_benign)},
+                       batch_size=int(batch_size))
     return {**out_parts, "meta": meta}
 
 
@@ -299,63 +260,50 @@ def write_split(
     *,
     in_parquet: str,
     out_dir: str,
-    quota: int = 5000,
+    quota: int        = 5000,
     benign_ratio: float = 1.0,
-    equal: bool = False,
+    equal: bool       = False,
     train_frac: float = 0.70,
-    val_frac: float = 0.15,
-    test_frac: float = 0.15,
-    seed: int = 104,
-    batch_size: int = 131072,
+    val_frac: float   = 0.15,
+    test_frac: float  = 0.15,
+    seed: int         = 104,
+    batch_size: int   = 131072,
 ) -> Path:
-    """
-    Run the streaming sampler, write parquet outputs, and persist the report.
-
-    This is the single file-writing path used by both the CLI and notebook API.
-    """
+    """Run the streaming sampler, write parquet outputs, and persist the report."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    # Build the in-memory balanced core and the three split DataFrames.
     result = run_streaming(
-        in_parquet,
-        quota=quota,
-        benign_ratio=benign_ratio,
-        equal=equal,
-        train_frac=train_frac,
-        val_frac=val_frac,
-        test_frac=test_frac,
-        seed=seed,
-        batch_size=batch_size,
+        in_parquet, quota=quota, benign_ratio=benign_ratio, equal=equal,
+        train_frac=train_frac, val_frac=val_frac, test_frac=test_frac,
+        seed=seed, batch_size=batch_size,
     )
 
     for s in ["train", "val", "test"]:
-        # Write the final split tables exactly once after sampling is complete.
         result[s].to_parquet(out / f"{s}.parquet", index=False)
     (out / "split_report.json").write_text(
-        json.dumps({**result["meta"], "splits": make_report({k: result[k] for k in ["train","val","test"]})}, indent=2)
+        json.dumps({**result["meta"], "splits": make_report({k: result[k] for k in ["train", "val", "test"]})}, indent=2)
     )
     return out
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--in_parquet", required=True)
-    ap.add_argument("--out_dir",    required=True)
-    ap.add_argument("--quota",      type=int,   default=5000)
-    ap.add_argument("--benign_ratio", type=float, default=1.0)
-    ap.add_argument("--equal",      action="store_true",
+    ap.add_argument("--in_parquet",    required=True)
+    ap.add_argument("--out_dir",       required=True)
+    ap.add_argument("--quota",         type=int,   default=5000)
+    ap.add_argument("--benign_ratio",  type=float, default=1.0)
+    ap.add_argument("--equal",         action="store_true",
                     help="force all attack families to the same size (bottlenecked by smallest class)")
-    ap.add_argument("--train_frac", type=float, default=0.70)
-    ap.add_argument("--val_frac",   type=float, default=0.15)
-    ap.add_argument("--test_frac",  type=float, default=0.15)
-    ap.add_argument("--seed",       type=int,   default=104)
-    ap.add_argument("--batch_size", type=int,   default=131072)
+    ap.add_argument("--train_frac",    type=float, default=0.70)
+    ap.add_argument("--val_frac",      type=float, default=0.15)
+    ap.add_argument("--test_frac",     type=float, default=0.15)
+    ap.add_argument("--seed",          type=int,   default=104)
+    ap.add_argument("--batch_size",    type=int,   default=131072)
     a = ap.parse_args()
 
     out = Path(a.out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    # The CLI shares the same streaming implementation used by the notebook wrapper.
     result = run_streaming(
         a.in_parquet, a.quota, a.benign_ratio, a.equal,
         a.train_frac, a.val_frac, a.test_frac, a.seed, a.batch_size
@@ -363,7 +311,7 @@ def main():
     for s in ["train", "val", "test"]:
         result[s].to_parquet(out / f"{s}.parquet", index=False)
     (out / "split_report.json").write_text(
-        json.dumps({**result["meta"], "splits": make_report({k: result[k] for k in ["train","val","test"]})}, indent=2)
+        json.dumps({**result["meta"], "splits": make_report({k: result[k] for k in ["train", "val", "test"]})}, indent=2)
     )
     print(f"[*] Written -> {out}")
 

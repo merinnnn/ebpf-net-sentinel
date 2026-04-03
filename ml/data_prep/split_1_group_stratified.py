@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
 Split 1: leakage diagnostic grouped on (orig_h, resp_h).
-All flows for a host pair stay in the same split, preventing host-identity leakage.
+
+All flows for a host pair stay in the same partition, preventing host-identity leakage.
 Dominant label: attack wins over benign if any attack rows exist in the group.
 Two-pass streaming: pass 1 builds the group table, pass 2 writes parquet splits.
 
-Limitation: stratification is by group count, not row volume. Val/test may have very few attack rows when attack traffic is concentrated in a few large groups.
-Use this split for leakage diagnostics only.
-Use Split 2/4 for model selection.
+Limitation: stratification is by group count, not row volume. Val/test may have very
+few attack rows when attack traffic is concentrated in a few large groups.
+Use this split for leakage diagnostics only; use Split 2/4 for model selection.
+
 Outputs: train.parquet, val.parquet, test.parquet, split_report.json
 """
 
@@ -23,7 +25,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-LABEL_COL = "label_family"
+LABEL_COL  = "label_family"
 ATTACK_COL = "is_attack"
 GROUP_COLS = ("orig_h", "resp_h")
 BENIGN_LIKE = frozenset({"BENIGN", "Unknown", "nan", "NaN", ""})
@@ -39,7 +41,6 @@ def _iter_batches(parquet_path: str, batch_size: int, columns=None):
 def _dominant_label(s: pd.Series) -> str:
     """Return the dominant label for a host-pair group. Attack labels take priority over BENIGN."""
     vc = s.astype(str).value_counts(dropna=False)
-    # Scan labels in descending count order and keep the first attack family we see.
     for k, _v in vc.items():
         if str(k) not in BENIGN_LIKE:
             return str(k)
@@ -48,26 +49,19 @@ def _dominant_label(s: pd.Series) -> str:
 
 def build_group_table(in_parquet: str, batch_size: int = 131072) -> pd.DataFrame:
     """
-    Return DataFrame with columns:
-      - orig_h, resp_h
-      - n_rows
-      - dom_label
-      - attack_rows
-      - benign_rows
+    Return DataFrame with columns: orig_h, resp_h, n_rows, dom_label, attack_rows, benign_rows.
     """
-    # Use small dicts to stay memory-safe on the full dataset.
     key_to_rows: Dict[Tuple[str, str], int] = {}
     key_to_attack: Dict[Tuple[str, str], int] = {}
     key_to_label_counts: Dict[Tuple[str, str], Dict[str, int]] = {}
 
     cols = list(GROUP_COLS) + [LABEL_COL, ATTACK_COL]
     for df in _iter_batches(in_parquet, batch_size, columns=cols):
-        df[LABEL_COL] = df[LABEL_COL].astype(str)
+        df[LABEL_COL]  = df[LABEL_COL].astype(str)
         df[ATTACK_COL] = pd.to_numeric(df[ATTACK_COL], errors="coerce").fillna(0).astype(int)
 
-        # Count rows per host-pair group for this batch.
-        g = df.groupby(list(GROUP_COLS), dropna=False)
-        sizes = g.size()
+        g       = df.groupby(list(GROUP_COLS), dropna=False)
+        sizes   = g.size()
         attacks = g[ATTACK_COL].sum()
 
         for (oh, rh), n in sizes.items():
@@ -78,7 +72,6 @@ def build_group_table(in_parquet: str, batch_size: int = 131072) -> pd.DataFrame
             k = (str(oh), str(rh))
             key_to_attack[k] = key_to_attack.get(k, 0) + int(a)
 
-        # Track label counts per group for dominant-label computation.
         tmp = df.groupby(list(GROUP_COLS) + [LABEL_COL], dropna=False).size()
         for (oh, rh, lab), n in tmp.items():
             k = (str(oh), str(rh))
@@ -93,22 +86,19 @@ def build_group_table(in_parquet: str, batch_size: int = 131072) -> pd.DataFrame
     for k, n_rows in key_to_rows.items():
         label_counts = key_to_label_counts.get(k, {})
         if label_counts:
-            # Reconstruct a weighted label series for the dominant-label helper.
             labs = pd.Series(label_counts)
-            dom = _dominant_label(pd.Series(np.repeat(list(labs.index), list(labs.values))))
+            dom  = _dominant_label(pd.Series(np.repeat(list(labs.index), list(labs.values))))
         else:
             dom = "Unknown"
         arows = key_to_attack.get(k, 0)
-        rows.append(
-            {
-                GROUP_COLS[0]: k[0],
-                GROUP_COLS[1]: k[1],
-                "n_rows": int(n_rows),
-                "attack_rows": int(arows),
-                "benign_rows": int(n_rows - arows),
-                "dom_label": str(dom),
-            }
-        )
+        rows.append({
+            GROUP_COLS[0]: k[0],
+            GROUP_COLS[1]: k[1],
+            "n_rows":      int(n_rows),
+            "attack_rows": int(arows),
+            "benign_rows": int(n_rows - arows),
+            "dom_label":   str(dom),
+        })
     return pd.DataFrame(rows)
 
 
@@ -121,32 +111,30 @@ def assign_groups_row_weighted(
     seed: int,
 ) -> Dict[str, List[int]]:
     """Greedy row-weighted group assignment. Balances total rows per label, not just group count."""
-    rng = np.random.default_rng(seed)
-    grp = grp.reset_index(drop=True)
+    rng  = np.random.default_rng(seed)
+    grp  = grp.reset_index(drop=True)
     grp["_gid"] = grp.index.astype(int)
 
     assignments = {"train": [], "val": [], "test": []}
 
     for lab, sub in grp.groupby("dom_label", sort=False):
-        # Shuffle within each label bucket so ties do not always break the same way.
-        sub = sub.sample(frac=1.0, random_state=seed).copy()  # shuffle groups
+        sub   = sub.sample(frac=1.0, random_state=seed).copy()
         total = int(sub["n_rows"].sum())
         targets = {
             "train": int(round(total * train_ratio)),
-            "val": int(round(total * val_ratio)),
-            "test": total - int(round(total * train_ratio)) - int(round(total * val_ratio)),
+            "val":   int(round(total * val_ratio)),
+            "test":  total - int(round(total * train_ratio)) - int(round(total * val_ratio)),
         }
         remaining = targets.copy()
 
-        # Largest groups first, hardest to fit, so assign them early.
+        # Largest groups first so they are assigned while slots are still open.
         sub = sub.sort_values("n_rows", ascending=False)
 
         for _, row in sub.iterrows():
             gid = int(row["_gid"])
-            w = int(row["n_rows"])
-            # Pick the split furthest below its row target.
+            w   = int(row["n_rows"])
             best_splits = sorted(remaining.items(), key=lambda kv: kv[1], reverse=True)
-            top = best_splits[0][1]
+            top  = best_splits[0][1]
             cand = [s for s, rem in best_splits if rem == top]
             chosen = cand[int(rng.integers(0, len(cand)))]
             assignments[chosen].append(gid)
@@ -155,7 +143,9 @@ def assign_groups_row_weighted(
     return assignments
 
 
-def assign_groups_naive_stratified(grp: pd.DataFrame, *, train_ratio: float, val_ratio: float, seed: int):
+def assign_groups_naive_stratified(
+    grp: pd.DataFrame, *, train_ratio: float, val_ratio: float, seed: int
+):
     """Stratified group assignment by group count (legacy behavior, ignores row volume)."""
     from sklearn.model_selection import train_test_split
 
@@ -165,7 +155,6 @@ def assign_groups_naive_stratified(grp: pd.DataFrame, *, train_ratio: float, val
     g_train, g_tmp = train_test_split(
         grp, test_size=(1.0 - train_ratio), random_state=seed, stratify=grp["dom_label"]
     )
-    # Split the held-out portion one more time to get validation and test groups.
     rel_val = val_ratio / (1.0 - train_ratio)
     g_val, g_test = train_test_split(
         g_tmp, test_size=(1.0 - rel_val), random_state=seed, stratify=g_tmp["dom_label"]
@@ -173,8 +162,8 @@ def assign_groups_naive_stratified(grp: pd.DataFrame, *, train_ratio: float, val
 
     return {
         "train": g_train["_gid"].tolist(),
-        "val": g_val["_gid"].tolist(),
-        "test": g_test["_gid"].tolist(),
+        "val":   g_val["_gid"].tolist(),
+        "test":  g_test["_gid"].tolist(),
     }
 
 
@@ -190,7 +179,6 @@ def write_splits_streaming(
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    # Build fast lookups: gid -> split, and group key -> gid.
     gid_to_split = {}
     for split, gids in group_assign.items():
         for gid in gids:
@@ -201,7 +189,7 @@ def write_splits_streaming(
     }
 
     writers = {}
-    schema = None
+    schema  = None
 
     def _writer(name: str, schema: pa.Schema):
         path = out / f"{name}.parquet"
@@ -218,26 +206,25 @@ def write_splits_streaming(
     for df in _iter_batches(in_parquet, batch_size, columns=None):
         df[GROUP_COLS[0]] = df[GROUP_COLS[0]].astype(str)
         df[GROUP_COLS[1]] = df[GROUP_COLS[1]].astype(str)
-        df[ATTACK_COL] = pd.to_numeric(df[ATTACK_COL], errors="coerce").fillna(0).astype(int)
+        df[ATTACK_COL]    = pd.to_numeric(df[ATTACK_COL], errors="coerce").fillna(0).astype(int)
 
         if schema is None:
             schema = pa.Table.from_pandas(df.head(1), preserve_index=False).schema
             writers["train"] = _writer("train", schema)
-            writers["val"] = _writer("val", schema)
-            writers["test"] = _writer("test", schema)
+            writers["val"]   = _writer("val",   schema)
+            writers["test"]  = _writer("test",  schema)
 
-        # Assign each row: key -> gid -> split.
-        keys = list(zip(df[GROUP_COLS[0]].tolist(), df[GROUP_COLS[1]].tolist()))
-        gids = [key_to_gid.get(k, None) for k in keys]
+        keys   = list(zip(df[GROUP_COLS[0]].tolist(), df[GROUP_COLS[1]].tolist()))
+        gids   = [key_to_gid.get(k, None) for k in keys]
         splits = [gid_to_split.get(g, "train") if g is not None else "train" for g in gids]
-        df = df.copy()
+        df     = df.copy()
         df["_split"] = splits
 
         for split in ["train", "val", "test"]:
             part = df[df["_split"] == split].drop(columns=["_split"])
             if len(part):
                 writers[split].write_table(_to_table(part, schema))
-                stats[split]["rows"] += int(len(part))
+                stats[split]["rows"]    += int(len(part))
                 stats[split]["attacks"] += int((part[ATTACK_COL] == 1).sum())
 
     for w in writers.values():
@@ -247,9 +234,7 @@ def write_splits_streaming(
 
 
 def make_report(stats: Dict[str, Dict[str, int]]) -> Dict[str, Dict[str, int]]:
-    """
-    Backward-compatible helper for notebook imports.
-    """
+    """Backward-compatible helper for notebook imports."""
     return {
         split: {"rows": int(v.get("rows", 0)), "attacks": int(v.get("attacks", 0))}
         for split, v in stats.items()
@@ -261,10 +246,10 @@ def run(
     in_parquet: str,
     out_dir: str,
     train_frac: float = 0.70,
-    val_frac: float = 0.15,
-    test_frac: float = 0.15,
-    seed: int = 104,
-    batch_size: int = 131072,
+    val_frac: float   = 0.15,
+    test_frac: float  = 0.15,
+    seed: int         = 104,
+    batch_size: int   = 131072,
     row_weighted: bool = True,
 ):
     """Notebook entry point: build group table, assign splits, write parquets and report."""
@@ -274,37 +259,25 @@ def run(
     grp = build_group_table(str(in_parquet), batch_size=batch_size)
     if row_weighted:
         assign = assign_groups_row_weighted(
-            grp,
-            train_ratio=train_frac,
-            val_ratio=val_frac,
-            test_ratio=test_frac,
-            seed=seed,
+            grp, train_ratio=train_frac, val_ratio=val_frac, test_ratio=test_frac, seed=seed,
         )
     else:
-        assign = assign_groups_naive_stratified(
-            grp,
-            train_ratio=train_frac,
-            val_ratio=val_frac,
-            seed=seed,
-        )
+        assign = assign_groups_naive_stratified(grp, train_ratio=train_frac, val_ratio=val_frac, seed=seed)
 
-    stats = write_splits_streaming(
-        in_parquet=str(in_parquet),
-        out_dir=str(out_dir),
-        group_table=grp,
-        group_assign=assign,
-        batch_size=batch_size,
+    stats  = write_splits_streaming(
+        in_parquet=str(in_parquet), out_dir=str(out_dir),
+        group_table=grp, group_assign=assign, batch_size=batch_size,
     )
     report = {
-        "split": "split1_group_stratified",
-        "in_parquet": str(in_parquet),
-        "out_dir": str(out_dir),
-        "seed": int(seed),
-        "row_weighted": bool(row_weighted),
-        "groups": int(len(grp)),
-        "rows_total": int(grp["n_rows"].sum()),
-        "attacks_total": int(grp["attack_rows"].sum()),
-        "splits": make_report(stats),
+        "split":          "split1_group_stratified",
+        "in_parquet":     str(in_parquet),
+        "out_dir":        str(out_dir),
+        "seed":           int(seed),
+        "row_weighted":   bool(row_weighted),
+        "groups":         int(len(grp)),
+        "rows_total":     int(grp["n_rows"].sum()),
+        "attacks_total":  int(grp["attack_rows"].sum()),
+        "splits":         make_report(stats),
     }
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
@@ -314,14 +287,14 @@ def run(
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--in_parquet", required=True)
-    ap.add_argument("--out_dir", required=True)
-    ap.add_argument("--train_ratio", type=float, default=0.70)
-    ap.add_argument("--val_ratio", type=float, default=0.15)
-    ap.add_argument("--test_ratio", type=float, default=0.15)
-    ap.add_argument("--seed", type=int, default=104)
-    ap.add_argument("--batch_size", type=int, default=131072)
-    ap.add_argument("--row_weighted", type=str, default="true", help="true/false (default true)")
+    ap.add_argument("--in_parquet",   required=True)
+    ap.add_argument("--out_dir",      required=True)
+    ap.add_argument("--train_ratio",  type=float, default=0.70)
+    ap.add_argument("--val_ratio",    type=float, default=0.15)
+    ap.add_argument("--test_ratio",   type=float, default=0.15)
+    ap.add_argument("--seed",         type=int,   default=104)
+    ap.add_argument("--batch_size",   type=int,   default=131072)
+    ap.add_argument("--row_weighted", type=str,   default="true")
     a = ap.parse_args()
 
     if abs((a.train_ratio + a.val_ratio + a.test_ratio) - 1.0) > 1e-6:
@@ -329,42 +302,38 @@ def main():
 
     row_weighted = str(a.row_weighted).lower() in ("1", "true", "yes", "y")
 
-    print("[*] Building group table ...")
+    print("[*] Building group table...")
     grp = build_group_table(a.in_parquet, batch_size=a.batch_size)
-
-    # Print a quick overview before writing any outputs.
-    print(f"  groups: {len(grp):,}")
-    print(f"  rows  : {int(grp['n_rows'].sum()):,}")
-    print(f"  attacks rows: {int(grp['attack_rows'].sum()):,}")
+    print(f"  groups      : {len(grp):,}")
+    print(f"  rows        : {int(grp['n_rows'].sum()):,}")
+    print(f"  attack rows : {int(grp['attack_rows'].sum()):,}")
     print()
 
-    print("[*] Assigning groups to splits ...")
+    print("[*] Assigning groups to splits...")
     if row_weighted:
         assign = assign_groups_row_weighted(
             grp, train_ratio=a.train_ratio, val_ratio=a.val_ratio, test_ratio=a.test_ratio, seed=a.seed
         )
     else:
-        assign = assign_groups_naive_stratified(grp, train_ratio=a.train_ratio, val_ratio=a.val_ratio, seed=a.seed)
+        assign = assign_groups_naive_stratified(
+            grp, train_ratio=a.train_ratio, val_ratio=a.val_ratio, seed=a.seed
+        )
 
-    # Stream the source parquet once more and write the final split files.
-    print("[*] Writing parquet splits ...")
+    print("[*] Writing parquet splits...")
     stats = write_splits_streaming(
-        in_parquet=a.in_parquet,
-        out_dir=a.out_dir,
-        group_table=grp,
-        group_assign=assign,
-        batch_size=a.batch_size,
+        in_parquet=a.in_parquet, out_dir=a.out_dir,
+        group_table=grp, group_assign=assign, batch_size=a.batch_size,
     )
 
     report = {
-        "protocol": "split1_group_stratified",
-        "in_parquet": str(a.in_parquet),
-        "out_dir": str(a.out_dir),
-        "seed": int(a.seed),
-        "row_weighted": bool(row_weighted),
-        "groups": int(len(grp)),
-        "rows_total": int(grp["n_rows"].sum()),
-        "attacks_total": int(grp["attack_rows"].sum()),
+        "protocol":       "split1_group_stratified",
+        "in_parquet":     str(a.in_parquet),
+        "out_dir":        str(a.out_dir),
+        "seed":           int(a.seed),
+        "row_weighted":   bool(row_weighted),
+        "groups":         int(len(grp)),
+        "rows_total":     int(grp["n_rows"].sum()),
+        "attacks_total":  int(grp["attack_rows"].sum()),
         "splits": {
             k: {"rows": int(v["rows"]), "attacks": int(v["attacks"])}
             for k, v in stats.items()
@@ -372,8 +341,7 @@ def main():
         "notes": [
             "Groups are (orig_h, resp_h). All rows in a group go to the same split.",
             "Dominant label: any-attack-wins; otherwise BENIGN.",
-            "Best-effort stratification: ultra-rare dominant labels are collapsed for stratify; if still impossible we fall back to non-stratified splits.",
-            "LIMITATION: stratification is by group count, not row volume. Val/test may have very few attack rows if attack traffic is concentrated in few large groups. USE FOR LEAKAGE DIAGNOSTICS ONLY, not for headline metrics.",
+            "Stratification is by group count, not row volume. Val/test may have very few attack rows if attack traffic is concentrated in few large groups. USE FOR LEAKAGE DIAGNOSTICS ONLY.",
         ],
     }
     Path(a.out_dir).mkdir(parents=True, exist_ok=True)

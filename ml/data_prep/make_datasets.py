@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Reads a merged Parquet and writes:
-- baseline.parquet: Zeek-ish features (+ day, label_family)
-- enhanced.parquet: baseline + eBPF-ish features (+ day, label_family)
+  - baseline.parquet : Zeek features (+ day, label_family)
+  - enhanced.parquet : baseline + eBPF features (+ day, label_family)
 """
 
 from datetime import datetime
@@ -24,7 +24,6 @@ LABEL_COL = "label_family"
 DAY_COL   = "day"
 
 
-# Backwards-compatible API
 def run(
     *,
     in_parquet: str,
@@ -34,23 +33,14 @@ def run(
     drop_unknown: bool = True,
     batch_size: int = 131072,
 ):
-    """
-    Run dataset builder via the module CLI to keep one codepath.
-    """
+    """Notebook entry point. Delegates to the module CLI to keep one codepath."""
     cmd = [
-        sys.executable,
-        "-m",
-        "ml.data_prep.make_datasets",
-        "--in_parquet",
-        str(in_parquet),
-        "--out_baseline",
-        str(out_baseline),
-        "--out_enhanced",
-        str(out_enhanced),
-        "--report_dir",
-        str(report_dir),
-        "--batch_size",
-        str(batch_size),
+        sys.executable, "-m", "ml.data_prep.make_datasets",
+        "--in_parquet",  str(in_parquet),
+        "--out_baseline", str(out_baseline),
+        "--out_enhanced", str(out_enhanced),
+        "--report_dir",  str(report_dir),
+        "--batch_size",  str(batch_size),
     ]
     if drop_unknown:
         cmd += ["--drop_unknown"]
@@ -58,7 +48,6 @@ def run(
         cmd += ["--keep_unknown"]
     subprocess.run(cmd, check=True)
     return Path(report_dir)
-
 
 def make_report(report_dir: str):
     """Load and return make_datasets_meta.json as a dict."""
@@ -73,16 +62,14 @@ EBPF_HINTS = (
 DROP_ALWAYS = {LABEL_COL, DAY_COL}
 
 def looks_like_ebpf(col: str) -> bool:
-    """Heuristic used to classify a source column as eBPF-derived."""
+    """Heuristic to classify a column as eBPF-derived."""
     c = col.lower()
     return any(h in c for h in EBPF_HINTS)
 
 def select_feature_columns(columns: List[str]) -> Tuple[List[str], List[str], List[str]]:
     """
-    Split the source schema into baseline columns and eBPF-specific columns.
-
-    The baseline output keeps every non-eBPF feature except the explicit label/day
-    columns. The enhanced output appends the detected eBPF columns to that baseline.
+    Split the source schema into baseline and eBPF-specific columns.
+    The baseline keeps every non-eBPF feature; enhanced appends the eBPF columns.
     """
     baseline = []
     ebpf_cols = []
@@ -101,7 +88,7 @@ def _encode_categorical_ebpf(df: pd.DataFrame, ebpf_cols: list,
                               fit: bool = False) -> tuple:
     """
     Frequency-encode categorical eBPF columns (e.g. comm/exe).
-    When fit=True, freq_maps are fit on all rows, not just training rows, which leaks test-day frequencies.
+    When fit=True, freq_maps are fit on all rows, which leaks test-day frequencies.
     Pass pre-fit freq_maps from make_train_aligned_encoding() to avoid this.
     """
     cat_cols = [c for c in ebpf_cols if c in df.columns
@@ -121,7 +108,6 @@ def _encode_categorical_ebpf(df: pd.DataFrame, ebpf_cols: list,
         df[c] = df[c].astype(str).map(fmap).fillna(0.0).astype(float)
 
     return df, freq_maps or {}
-
 
 def make_train_aligned_encoding(
     train_parquet_path: str,
@@ -151,13 +137,11 @@ def make_train_aligned_encoding(
             freq_maps[c] = {k: v / total for k, v in ctr.items()}
     return freq_maps
 
-
 def _iter_batches(parquet_path: str, batch_size: int, columns=None):
-    """Yield pandas DataFrames from the input parquet in fixed-size batches."""
+    """Yield pandas DataFrames from a Parquet file in fixed-size batches."""
     pf = pq.ParquetFile(parquet_path)
     for batch in pf.iter_batches(batch_size=batch_size, columns=columns):
         yield batch.to_pandas()
-
 
 def build_datasets(
     *,
@@ -170,17 +154,12 @@ def build_datasets(
 ) -> dict:
     """
     Build baseline/enhanced feature-set Parquets.
-
-    Entry point used by notebooks (no argparse / sys.argv mutation).
-    Returns the report metadata dict written to report_dir.
+    Notebook entry point (no argparse). Returns the metadata dict written to report_dir.
     """
-
-    # Create output directories up front so later writer construction is simple.
     os.makedirs(os.path.dirname(out_baseline), exist_ok=True)
     os.makedirs(os.path.dirname(out_enhanced), exist_ok=True)
     os.makedirs(report_dir, exist_ok=True)
 
-    # Inspect the source schema once so all later column choices are deterministic.
     pf = pq.ParquetFile(in_parquet)
     schema = pf.schema_arrow
     cols = [f.name for f in schema]
@@ -191,22 +170,22 @@ def build_datasets(
 
     baseline_cols, enhanced_cols, ebpf_cols = select_feature_columns(cols)
 
-    # Always preserve day and label when present so downstream split builders can use them.
+    # Always preserve day and label so downstream split builders can use them.
     base_out_cols = [c for c in [DAY_COL, LABEL_COL] if c in cols] + baseline_cols
-    enh_out_cols = [c for c in [DAY_COL, LABEL_COL] if c in cols] + enhanced_cols
+    enh_out_cols  = [c for c in [DAY_COL, LABEL_COL] if c in cols] + enhanced_cols
 
     base_writer = None
-    enh_writer = None
+    enh_writer  = None
 
-    before_rows = int(pf.metadata.num_rows)
-    after_rows = 0
+    before_rows    = int(pf.metadata.num_rows)
+    after_rows     = 0
     unknown_removed = 0
+    label_counts   = {}
+    day_counts     = {}
 
-    label_counts = {}
-    day_counts = {}
-
-    # Pass 1 gathers frequency maps for categorical eBPF columns. This matches
-    # the historical dataset build, even though it leaks information across days.
+    # Pass 1: build frequency maps for categorical eBPF columns from all rows.
+    # This matches the historical dataset build but leaks across days; 
+    # use make_train_aligned_encoding(train_parquet) for a leakage-free alternative.
     freq_maps_ebpf = make_train_aligned_encoding(in_parquet, ebpf_cols, batch_size)
     if freq_maps_ebpf:
         print(f"[make_datasets] Fitted full-dataset freq maps for: {list(freq_maps_ebpf)}")
@@ -215,17 +194,15 @@ def build_datasets(
     else:
         print("[make_datasets] No categorical eBPF columns found to encode.")
 
-    # Pass 2 streams the dataset again and writes the two output parquets.
+    # Pass 2: stream the dataset and write the two output parquets.
     for df in _iter_batches(in_parquet, batch_size, columns=list(set(base_out_cols + enh_out_cols))):
         if drop_unknown:
-            # Unknown labels are removed here so both output feature sets stay aligned.
             unknown_mask = df[LABEL_COL].astype(str).str.lower().eq("unknown")
             unknown_removed += int(unknown_mask.sum())
             df = df.loc[~unknown_mask].copy()
 
         after_rows += len(df)
 
-        # Keep running label/day summaries so the metadata file can describe the final outputs.
         labs = df[LABEL_COL].astype(str)
         vc = labs.value_counts(dropna=False)
         for k, v in vc.items():
@@ -236,20 +213,17 @@ def build_datasets(
             for d, v in dvc.items():
                 day_counts[str(d)] = day_counts.get(str(d), 0) + int(v)
 
-        # Apply the categorical eBPF encoding before we write the enhanced dataset.
         enh_df_raw = df[enh_out_cols].copy()
         enh_df_enc, _ = _encode_categorical_ebpf(
             enh_df_raw, ebpf_cols, freq_maps=freq_maps_ebpf, fit=False
         )
 
-        # Write the baseline dataset exactly once per batch with the fixed schema from batch 1.
         base_df = df[base_out_cols]
         if base_writer is None:
             base_schema = pa.Table.from_pandas(base_df.head(1), preserve_index=False).schema
             base_writer = pq.ParquetWriter(out_baseline, schema=base_schema, compression="snappy")
         base_writer.write_table(pa.Table.from_pandas(base_df, preserve_index=False))
 
-        # Write the enhanced dataset with the encoded eBPF columns.
         if enh_writer is None:
             enh_schema = pa.Table.from_pandas(enh_df_enc.head(1), preserve_index=False).schema
             enh_writer = pq.ParquetWriter(out_enhanced, schema=enh_schema, compression="snappy")
@@ -260,7 +234,6 @@ def build_datasets(
     if enh_writer:
         enh_writer.close()
 
-    # Write a metadata summary for notebooks.
     meta = {
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "input": str(in_parquet),
@@ -276,11 +249,10 @@ def build_datasets(
             "method": "frequency_encoding (two-pass: full-dataset normalised count)",
             "leakage_warning": (
                 "Freq maps are fit on ALL rows (train+val+test days). "
-                "This introduces leakage into categorical eBPF features. "
                 "Friday test rows receive frequency codes derived partly from Friday data. "
                 "Use make_train_aligned_encoding(train_parquet) for leakage-free encoding."
             ),
-            "note": "Categorical eBPF columns (comm, exe, etc.) converted to float [0,1] freq codes so they survive numeric-only model pipelines.",
+            "note": "Categorical eBPF columns converted to float [0,1] freq codes for numeric-only pipelines.",
             "columns_encoded": list(freq_maps_ebpf.keys()) if freq_maps_ebpf else [],
         },
         "baseline_columns": base_out_cols,
@@ -298,17 +270,16 @@ def build_datasets(
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--in_parquet", required=True)
+    ap.add_argument("--in_parquet",   required=True)
     ap.add_argument("--out_baseline", required=True)
     ap.add_argument("--out_enhanced", required=True)
     ap.add_argument("--drop_unknown", action="store_true", default=True)
     ap.add_argument("--keep_unknown", action="store_true", default=False,
-                    help="Override: keep Unknown instead of dropping")
-    ap.add_argument("--report_dir", required=True)
-    ap.add_argument("--batch_size", type=int, default=131072)
+                    help="override: keep Unknown labels instead of dropping")
+    ap.add_argument("--report_dir",   required=True)
+    ap.add_argument("--batch_size",   type=int, default=131072)
     args = ap.parse_args()
 
-    # The keep_unknown flag overrides the default drop_unknown behavior.
     drop_unknown = args.drop_unknown and (not args.keep_unknown)
 
     build_datasets(

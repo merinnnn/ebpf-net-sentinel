@@ -629,9 +629,9 @@ def rank_interface(name: str) -> tuple[int, str]:
     lo = name.lower()
     if lo == "lo":                                              return (100, name)
     if lo == "ns0":                                             return (-1,  name)
-    if lo.startswith(("eno","enp","ens","eth","wlan","wlp")):  return (0,   name)
-    if lo.startswith(("tailscale","tun","tap")):               return (20,  name)
-    if lo.startswith(("docker","br-","veth","virbr")):         return (50,  name)
+    if lo.startswith(("eno","enp","ens","eth","wlan","wlp")):   return (0,   name)
+    if lo.startswith(("tailscale","tun","tap")):                return (20,  name)
+    if lo.startswith(("docker","br-","veth","virbr")):          return (50,  name)
     return (10, name)
 
 def preferred_interface(names: list[str]) -> str:
@@ -1591,8 +1591,8 @@ if S.filter_anom:
 
 count_label = (
     f"{len(display_evs):,} events"
-    + (" — anomalies only" if S.filter_anom else "")
-    + f" — {'live' if S.is_live else 'paused'}"
+    + (" - anomalies only" if S.filter_anom else "")
+    + f" - {'live' if S.is_live else 'paused'}"
 )
 
 st.markdown(
