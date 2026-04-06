@@ -12,7 +12,7 @@ source "$SCRIPT_DIR/_common.sh"
 require_tool nmap
 check_ns
 
-PORT_RANGE="${1:-1-1000}"
+PORT_RANGE="${1:-1-80}"
 
 echo "PORT SCAN  (range: ${PORT_RANGE})"
 
