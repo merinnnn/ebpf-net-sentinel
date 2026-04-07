@@ -14,6 +14,7 @@ import streamlit as st
 
 # Resolve the repo root from the env var or by searching parent directories.
 def get_repo_root() -> Path:
+    """Return the repository root path from env var or by walking up parent directories."""
     env = os.environ.get("NETSENTINEL_ROOT")
     if env:
         return Path(env)
@@ -597,6 +598,7 @@ hr { border-color: var(--border) !important; margin: 0 !important; }
 
 # Runtime state helpers
 def load_runtime_state() -> dict:
+    """Load and return the daemon's runtime state JSON, or {} on missing/parse error."""
     if not RUNTIME_STATE_PATH.exists():
         return {}
     try:
@@ -605,11 +607,13 @@ def load_runtime_state() -> dict:
         return {}
 
 def append_launcher_log(line: str) -> None:
+    """Append a timestamped line to the daemon launcher log file."""
     DAEMON_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with DAEMON_LOG_PATH.open("a", encoding="utf-8") as fh:
         fh.write(f"{datetime.now().isoformat()} {line.rstrip()}\n")
 
 def list_interfaces() -> list[str]:
+    """Return sorted list of non-loopback network interface names from ip-link."""
     try:
         out = subprocess.run(["ip", "-o", "link", "show"],
                              check=False, capture_output=True, text=True)
@@ -626,6 +630,7 @@ def list_interfaces() -> list[str]:
     return sorted(dict.fromkeys(names))
 
 def rank_interface(name: str) -> tuple[int, str]:
+    """Return a (priority, name) tuple where lower priority means preferred for capture."""
     lo = name.lower()
     if lo == "lo":                                              return (100, name)
     if lo == "ns0":                                             return (-1,  name)
@@ -635,6 +640,7 @@ def rank_interface(name: str) -> tuple[int, str]:
     return (10, name)
 
 def preferred_interface(names: list[str]) -> str:
+    """Return the best capture interface, honouring NETSENTINEL_DEFAULT_IFACE if set."""
     if not names:
         return ""
     env_iface = os.environ.get("NETSENTINEL_DEFAULT_IFACE", "").strip()
@@ -643,6 +649,7 @@ def preferred_interface(names: list[str]) -> str:
     return sorted(names, key=rank_interface)[0]
 
 def live_capture_is_running(runtime_state: dict | None) -> bool:
+    """Return True only when runtime state shows status=running and the PID is alive."""
     if not runtime_state:
         return False
     if runtime_state.get("status") != "running":
@@ -657,6 +664,7 @@ def live_capture_is_running(runtime_state: dict | None) -> bool:
     return True
 
 def start_live_capture(iface: str) -> tuple[bool, str]:
+    """Launch the live capture daemon as a detached subprocess and return (ok, message)."""
     if not iface:
         return False, "Choose an interface first."
     if os.geteuid() != 0:
@@ -685,6 +693,7 @@ def start_live_capture(iface: str) -> tuple[bool, str]:
     return True, f"Launched on {iface} (pid {proc.pid})."
 
 def stop_live_capture() -> tuple[bool, str]:
+    """Send SIGINT to the running daemon PID and return (ok, message)."""
     rt = load_runtime_state()
     pid = rt.get("pid")
     if not isinstance(pid, int) or pid <= 0:
@@ -699,6 +708,7 @@ def stop_live_capture() -> tuple[bool, str]:
     return True, f"Stop signal sent to pid {pid}."
 
 def maybe_autostart_live_capture() -> None:
+    """Auto-start live capture once if NETSENTINEL_AUTOSTART_LIVE_CAPTURE is set and not yet running."""
     if os.environ.get("NETSENTINEL_AUTOSTART_LIVE_CAPTURE","false").lower() not in {"1","true","yes","on"}:
         return
     if st.session_state.get("autostart_attempted"):
@@ -722,6 +732,7 @@ def maybe_autostart_live_capture() -> None:
         st.rerun()
 
 def resolve_repo_path(path_str: str) -> Path:
+    """Resolve path_str relative to REPO if not already absolute."""
     p = Path(path_str).expanduser()
     return p if p.is_absolute() else (REPO / p).resolve()
 
@@ -744,6 +755,7 @@ def _rebase_daemon_path(p_str: str) -> Path:
     return p
 
 def default_live_event_path() -> str:
+    """Return the default scored events file path from runtime state, or empty string."""
     state = load_runtime_state()
     for key in ("scored_events_path",):
         raw = state.get(key)
@@ -761,6 +773,7 @@ def default_live_event_path() -> str:
     return ""
 
 def resolve_live_event_path(rt: dict) -> str:
+    """Return the resolved scored events path from runtime state, falling back to the default."""
     raw = rt.get("scored_events_path")
     if raw:
         p = _rebase_daemon_path(raw)
@@ -769,6 +782,7 @@ def resolve_live_event_path(rt: dict) -> str:
     return default_live_event_path()
 
 def file_line_count(path_str: str) -> int:
+    """Count non-empty lines in the file at path_str, returning 0 if absent."""
     if not path_str:
         return 0
     path = Path(path_str)
@@ -782,6 +796,7 @@ def file_line_count(path_str: str) -> int:
     return count
 
 def tail_offset_for_path(path_str: str) -> int:
+    """Return the current byte size of the file so new polling starts from the tail."""
     if not path_str:
         return 0
     path = resolve_repo_path(path_str)
@@ -790,6 +805,7 @@ def tail_offset_for_path(path_str: str) -> int:
     return int(path.stat().st_size)
 
 def _pid_alive(pid: object) -> bool:
+    """Return True if the process with the given PID exists and is signal-reachable."""
     if not isinstance(pid, int) or pid <= 0:
         return False
     try:
@@ -812,6 +828,7 @@ def _state_age_secs(rt: dict) -> float | None:
         return None
 
 def runtime_probe_status(rt: dict) -> list[str]:
+    """Map runtime state to a per-probe status list of 'ok', 'warn', or 'err'."""
     if not rt:
         return ["err"] * len(PROBES)
     s = rt.get("status")
@@ -826,6 +843,7 @@ def runtime_probe_status(rt: dict) -> list[str]:
     return ["warn"] * len(PROBES)
 
 def runtime_capture_status(rt: dict | None) -> tuple[str, str]:
+    """Return (status_key, html_pill) describing the current capture health."""
     if not rt:
         return (
             "missing",
@@ -879,6 +897,7 @@ def runtime_capture_status(rt: dict | None) -> tuple[str, str]:
     )
 
 def sync_live_source_from_runtime() -> None:
+    """Sync session state interface and file path from the daemon's runtime state."""
     rt = load_runtime_state()
     if not rt:
         return
@@ -899,6 +918,7 @@ def sync_live_source_from_runtime() -> None:
     S.run_dir = str(_rebase_daemon_path(rd)) if rd else ""
 
 def _init():
+    """Initialise Streamlit session state with defaults on first page load."""
     rt     = load_runtime_state()
     ifaces = list_interfaces()
     live_path = default_live_event_path()
@@ -966,6 +986,7 @@ GRAPH_WINDOW_OPTIONS = [
 
 # Event parsing and scoring
 def normalise_event(ev: dict) -> dict:
+    """Normalise raw event dict to canonical field names used by the UI."""
     out = dict(ev)
     if "_ts" not in out:
         try:    out["_ts"] = datetime.fromtimestamp(float(out.get("ts_s"))).strftime("%H:%M:%S")
@@ -991,6 +1012,7 @@ def normalise_event(ev: dict) -> dict:
     return out
 
 def read_file_events(path: str, offset: int) -> tuple[list[dict], int]:
+    """Read new JSONL events from path starting at byte offset; return (events, new_offset)."""
     p = resolve_repo_path(path)
     if not p.exists():
         # Daemon is still starting; preserve offset so we don't rewind to 0 once the file appears.
@@ -1024,6 +1046,7 @@ def read_file_events(path: str, offset: int) -> tuple[list[dict], int]:
     return evs, new_offset
 
 def score_class(s):
+    """Return (css_class, formatted_value) for a numeric anomaly score."""
     try:
         v = float(s)
         fmt = f"{v:.2e}" if v < 0.001 else f"{v:.3f}"
@@ -1034,12 +1057,14 @@ def score_class(s):
         return "ev-score-low", "N/A"
 
 def graph_window_label(window_s: int) -> str:
+    """Return the display label for a graph window duration in seconds."""
     for label, value in GRAPH_WINDOW_OPTIONS:
         if int(value) == int(window_s):
             return label
     return f"{window_s}s"
 
 def chart_bucket_seconds(window_s: int) -> int:
+    """Return the aggregation bucket width in seconds appropriate for the given window."""
     window_s = int(max(window_s, 1))
     if window_s <= 120:   return 2
     if window_s <= 300:   return 10
@@ -1049,9 +1074,11 @@ def chart_bucket_seconds(window_s: int) -> int:
     return 900
 
 def selected_model_key() -> str:
+    """Return 'baseline' or 'ebpf' based on the currently selected model name."""
     return "baseline" if S.model == "Baseline" else "ebpf"
 
 def runtime_model_threshold(rt: dict, model_name: str) -> float | None:
+    """Read the model's threshold from runtime state, or None if absent or invalid."""
     key = "baseline_threshold" if model_name == "Baseline" else "ebpf_threshold"
     try:
         value = rt.get(key)
@@ -1060,6 +1087,7 @@ def runtime_model_threshold(rt: dict, model_name: str) -> float | None:
         return None
 
 def event_score(ev: dict) -> float:
+    """Extract the anomaly score for the active model from an event dict."""
     model_key = selected_model_key()
     for key in (f"{model_key}_score", "anomaly_score"):
         try:
@@ -1070,6 +1098,7 @@ def event_score(ev: dict) -> float:
     return 0.0
 
 def event_label(ev: dict) -> str:
+    """Return the human-readable label ('ATTACK'/'BENIGN'/family name) for an event."""
     model_key = selected_model_key()
     pred_key = f"{model_key}_pred"
     if pred_key in ev:
@@ -1083,10 +1112,12 @@ def event_label(ev: dict) -> str:
     return str(ev.get("label") or "BENIGN")
 
 def label_style(lbl: str) -> str:
+    """Return an inline CSS style string for a label badge using its attack-family colour."""
     col = ATTACK_COLORS.get(lbl, ATTACK_COLORS["Unknown"])
     return f"background:{col}14;color:{col};border-color:{col}44;"
 
 def uptime_str(start: float) -> str:
+    """Format elapsed seconds since start as MM:SS or HH:MM:SS."""
     s = max(0, int(time.time() - start))
     h, rem = divmod(s, 3600)
     m, sec = divmod(rem, 60)
@@ -1165,6 +1196,7 @@ def rebuild_state_from_file(path: str, populate_graph: bool = True) -> None:
     S.loaded_threshold = float(S.threshold)
 
 def ingest(evs: list[dict]):
+    """Append new events to session state counters, graph points, and the rolling event list."""
     if not evs:
         return
     S.total_flows += len(evs)
@@ -1183,6 +1215,7 @@ def ingest(evs: list[dict]):
     S.events = S.events[:300]
 
 def build_chart_frame(points: list[dict], window_s: int) -> pd.DataFrame:
+    """Bucket graph_points into time-aggregated rows covering the last window_s seconds."""
     if not points:
         return pd.DataFrame(columns=["bucket", "pps", "score", "t"])
     df = pd.DataFrame(points)
