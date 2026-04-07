@@ -32,9 +32,11 @@ _ZEEK_JSON_FIELDS: dict[str, str] = {
 }
 
 def utc_now() -> str:
+    """Return the current UTC time as an ISO-8601 string."""
     return datetime.now(timezone.utc).isoformat()
 
 def repo_root() -> Path:
+    """Return the repository root (three directories above this file)."""
     return Path(__file__).resolve().parent.parent.parent
 
 REPO = repo_root()
@@ -43,29 +45,35 @@ STATE_PATH = RUNTIME_DIR / "live_capture_state.json"
 DAEMON_LOG = RUNTIME_DIR / "live_capture_daemon.log"
 
 def write_json_atomic(path: Path, payload: dict) -> None:
+    """Write payload as JSON to a temp file then rename it atomically so readers never see a partial write."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     tmp.replace(path)
 
 def append_log(line: str) -> None:
+    """Append a timestamped line to the daemon log file."""
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     with DAEMON_LOG.open("a", encoding="utf-8") as fh:
         fh.write(f"{utc_now()} {line.rstrip()}\n")
 
 def info(line: str) -> None:
+    """Print a line to stdout and append it to the daemon log."""
     print(line, flush=True)
     append_log(line)
 
 def require_root() -> None:
+    """Abort with an error message if the process is not running as root."""
     if os.geteuid() != 0:
         raise SystemExit("run this program as root (for Zeek live capture and eBPF attach)")
 
 def require_cmd(name: str) -> None:
+    """Raise RuntimeError if a required external command is not found on PATH."""
     if shutil.which(name) is None:
         raise RuntimeError(f"required command not found on PATH: {name}")
 
 def count_lines(path: Path) -> int:
+    """Count non-empty lines in a file, returning 0 if the file does not exist."""
     if not path.exists():
         return 0
     n = 0
@@ -76,6 +84,7 @@ def count_lines(path: Path) -> int:
     return n
 
 def run_sync(cmd: list[str], log_path: Path, *, cwd: Optional[Path] = None) -> subprocess.CompletedProcess[str]:
+    """Run a command synchronously, logging its stdout and stderr to log_path."""
     with log_path.open("a", encoding="utf-8") as log_fh:
         log_fh.write(f"\n[{utc_now()}] RUN {' '.join(cmd)}\n")
         log_fh.flush()
@@ -89,6 +98,7 @@ def run_sync(cmd: list[str], log_path: Path, *, cwd: Optional[Path] = None) -> s
         )
 
 def stop_process(proc: Optional[subprocess.Popen[str]], name: str, timeout_s: float = 8.0) -> None:
+    """Gracefully stop a subprocess: SIGINT first, then SIGTERM, then SIGKILL if it won't exit."""
     if proc is None or proc.poll() is not None:
         return
     append_log(f"stopping {name} pid={proc.pid}")
@@ -124,7 +134,8 @@ class LivePaths:
 
 PROTO_MAP = {"tcp": 6.0, "udp": 17.0, "icmp": 1.0}
 
-# Cap on cached eBPF flow entries. SYN floods can generate 600k+ entries; this prevents DataFrame bloat.
+# Maximum eBPF flow entries kept in memory.
+# SYN floods can produce 600k+ entries per cycle; capping here prevents unbounded DataFrame growth.
 # Oldest entries are evicted first.
 _MAX_EBPF_CACHE = 50_000
 
@@ -147,6 +158,7 @@ class LiveScorer:
         self._load_models()
 
     def _load_pack(self, name: str) -> dict:
+        """Load a headline model pack by name and scale its threshold down for live traffic."""
         path = self.repo / "data" / "models" / f"{name}_headline_model_seed104.joblib"
         if not path.exists():
             raise FileNotFoundError(path)
@@ -157,6 +169,7 @@ class LiveScorer:
             raise RuntimeError(f"invalid model pack: {path}")
         self._repair_model_compat(model)
         raw_threshold = float(pack.get("threshold", 0.5))
+        # Models were trained on compressed PCAP replay; live traffic scores are lower, so the threshold is scaled down.
         live_threshold = raw_threshold * self.threshold_multiplier
         return {
             "path": path,
@@ -191,6 +204,7 @@ class LiveScorer:
                     self._repair_model_compat(step)
 
     def _load_models(self) -> None:
+        """Attempt to load baseline and eBPF model packs; disable scoring if either is unavailable."""
         try:
             self.baseline_pack = self._load_pack("baseline")
             self.ebpf_pack = self._load_pack("ebpf")
@@ -201,6 +215,7 @@ class LiveScorer:
             self.message = f"live scoring disabled: {exc}"
 
     def state_extra(self) -> dict:
+        """Return scoring-related fields to be merged into the daemon state JSON."""
         payload = {
             "scoring_enabled": self.enabled,
             "scoring_message": self.message,
@@ -225,26 +240,31 @@ class LiveScorer:
         return comm
 
     def _coerce_numeric(self, series: pd.Series, default: float = 0.0) -> pd.Series:
+        """Convert a Series to float, filling any non-numeric values with default."""
         return pd.to_numeric(series, errors="coerce").fillna(default).astype(float)
 
     def _series_or_default(self, frame: pd.DataFrame, column: str, default: object) -> pd.Series:
+        """Return frame[column] if the column exists, otherwise a constant-value Series."""
         if column in frame.columns:
             return frame[column]
         return pd.Series([default] * len(frame), index=frame.index)
 
     def _scalar_int(self, value: object) -> int:
+        """Coerce a single value to int, returning 0 for NaN or non-numeric input."""
         num = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
         if pd.isna(num):
             return 0
         return int(num)
 
     def _scalar_float(self, value: object) -> float:
+        """Coerce a single value to float, returning 0.0 for NaN or non-numeric input."""
         num = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
         if pd.isna(num):
             return 0.0
         return float(num)
 
     def _build_features(self, frame: pd.DataFrame, features: list[str]) -> pd.DataFrame:
+        """Derive and align all model input features from a merged flow DataFrame."""
         df = frame.copy()
         df["duration"]   = self._coerce_numeric(df.get("duration", 0.0))
         df["orig_p"]     = self._coerce_numeric(df.get("orig_p", 0.0))
@@ -268,6 +288,7 @@ class LiveScorer:
         return df[features].copy().astype(float)
 
     def _predict(self, frame: pd.DataFrame, pack: dict) -> tuple[np.ndarray, np.ndarray]:
+        """Run a model pack against frame and return (score_array, binary_pred_array)."""
         X = self._build_features(frame, pack["features"])
         model = pack["model"]
         try:
@@ -288,6 +309,7 @@ class LiveScorer:
         return score, pred
 
     def score_new_rows(self, *, force_reset: bool = False) -> bool:
+        """Score only the rows added to merged.csv since the last call and append results to scored_events.jsonl."""
         if not self.enabled or not self.paths.merged_csv.exists():
             return False
 
@@ -360,6 +382,7 @@ class LiveScorer:
 class LiveCaptureDaemon:
     def __init__(self, iface: str, flush_secs: int, poll_secs: float, mode: str,
                  disable_kprobes: bool, threshold_multiplier: float = _DEFAULT_THRESHOLD_MULTIPLIER):
+        """Set up all run paths, incremental reader state, and the LiveScorer for this capture session."""
         self.iface = iface
         self.flush_secs = flush_secs
         self.poll_secs = poll_secs
@@ -411,6 +434,7 @@ class LiveCaptureDaemon:
         self.scorer = LiveScorer(REPO, self.paths, threshold_multiplier=self._threshold_multiplier)
 
     def write_state(self, status: str, message: str, **extra: object) -> None:
+        """Write the current daemon status, counters, and paths atomically to the shared state JSON file."""
         payload = {
             "status": status,
             "interface": self.iface,
@@ -437,6 +461,7 @@ class LiveCaptureDaemon:
         write_json_atomic(STATE_PATH, payload)
 
     def build_netmon(self) -> tuple[Path, Path]:
+        """Run make in ebpf_core and return paths to the compiled netmon binary and BPF object."""
         info("Building ebpf_core")
         res = run_sync(["make", "-C", str(REPO / "ebpf_core")], self.paths.netmon_log)
         if res.returncode != 0:
@@ -457,6 +482,7 @@ class LiveCaptureDaemon:
         return bin_path, obj_path
 
     def start_zeek(self) -> None:
+        """Start a Zeek live capture process on the configured interface with JSON output enabled."""
         # Reduce inactivity timeout from the 5 min default so that 
         # long-lived or flood connections appear in conn.log well within 
         # a minute of the last packet.
@@ -479,6 +505,7 @@ class LiveCaptureDaemon:
         )
 
     def start_netmon(self, bin_path: Path, obj_path: Path) -> None:
+        """Launch the netmon eBPF collector as a background process on the configured interface."""
         cmd = [
             str(bin_path),
             "-obj", str(obj_path),
@@ -761,12 +788,14 @@ class LiveCaptureDaemon:
         return True
 
     def check_children(self) -> None:
+        """Raise RuntimeError if either child process has exited unexpectedly."""
         if self.zeek_proc and self.zeek_proc.poll() is not None:
             raise RuntimeError(f"zeek exited unexpectedly with code {self.zeek_proc.returncode}")
         if self.netmon_proc and self.netmon_proc.poll() is not None:
             raise RuntimeError(f"netmon exited unexpectedly with code {self.netmon_proc.returncode}")
 
     def setup_run_meta(self) -> None:
+        """Write initial run_meta.json with mode, interface, and timestamp."""
         payload = {
             "mode": "live",
             "iface_capture": self.iface,
@@ -776,6 +805,7 @@ class LiveCaptureDaemon:
         write_json_atomic(self.paths.run_meta, payload)
 
     def run(self) -> int:
+        """Start Zeek and netmon, then poll and refresh outputs until stopped."""
         self.setup_run_meta()
         self.write_state("starting", f"preparing live capture on {self.iface}")
         info(f"Live run folder: {self.paths.run_dir}")
@@ -843,9 +873,11 @@ class LiveCaptureDaemon:
         return 0
 
     def stop(self) -> None:
+        """Signal the main loop to stop at the next iteration."""
         self.stop_requested = True
 
     def finalize(self, status: str, message: str) -> None:
+        """Stop child processes, flush final outputs, and write terminal state."""
         stop_process(self.netmon_proc, "netmon")
         stop_process(self.zeek_proc, "zeek")
         try:
@@ -859,6 +891,7 @@ class LiveCaptureDaemon:
 
 
 def install_signal_handlers(daemon: LiveCaptureDaemon) -> None:
+    """Register SIGINT and SIGTERM handlers that call daemon.stop()."""
     def _handler(signum: int, _frame: object) -> None:
         append_log(f"received signal {signum}, shutting down")
         daemon.stop()
@@ -867,6 +900,7 @@ def install_signal_handlers(daemon: LiveCaptureDaemon) -> None:
     signal.signal(signal.SIGTERM, _handler)
 
 def main() -> int:
+    """CLI entry point. Parses arguments, builds the daemon, and runs until stopped."""
     ap = argparse.ArgumentParser(description="Run live Zeek + netmon capture and keep outputs refreshed")
     ap.add_argument("iface", help="network interface to capture")
     ap.add_argument("--flush-secs", type=int, default=int(os.environ.get("FLUSH_SECS", "5")))
