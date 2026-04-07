@@ -11,6 +11,7 @@ def print_run_header(
     out_reports_dir: str,
     params: dict | None = None,
 ) -> None:
+    """Print run's paths and hyperparameters."""
     print(f"[*] {model_name}: {run_name}")
     print(f"  splits_dir      : {splits_dir}")
     print(f"  out_models_dir  : {out_models_dir}")
@@ -21,6 +22,7 @@ def print_run_header(
             print(f"    {key:<18s} {value}")
 
 def print_split_summary(name: str, n_rows: int, n_attack: int) -> None:
+    """Print row counts and attack/benign percentages."""
     benign     = int(n_rows - n_attack)
     attack_pct = (100.0 * n_attack / n_rows) if n_rows else 0.0
     benign_pct = (100.0 * benign   / n_rows) if n_rows else 0.0
@@ -28,6 +30,7 @@ def print_split_summary(name: str, n_rows: int, n_attack: int) -> None:
           f"  attack={n_attack:>9,} ({attack_pct:>5.1f}%)")
 
 def print_feature_summary(features: list[str], *, dropped: list[str] | None = None) -> None:
+    """Print feature count, preview of names, and all-NaN dropped columns."""
     print(f"[*] Feature space: {len(features)} numeric features")
     if features:
         preview = ", ".join(features[:10])
@@ -37,14 +40,17 @@ def print_feature_summary(features: list[str], *, dropped: list[str] | None = No
         print(f"  dropped_all_nan : {', '.join(dropped)}")
 
 def print_preprocessing_summary(text: str) -> None:
+    """Print the preprocessing pipeline description."""
     print(f"[*] Preprocessing: {text}")
 
 def print_tuning_summary(title: str, lines: list[str]) -> None:
+    """Print tuning details (strategy, best value, etc.)."""
     print(f"[*] {title}")
     for line in lines:
         print(f"  {line}")
 
 def print_metrics_block(title: str, metrics: dict) -> None:
+    """Print classification metrics (accuracy, precision, recall, F1, AUC) under a title."""
     print(f"[*] {title}")
     order = ["accuracy", "precision", "recall", "f1", "roc_auc", "pr_auc"]
     for key in order:
@@ -54,6 +60,7 @@ def print_metrics_block(title: str, metrics: dict) -> None:
         print(f"  {key:12s}: {value:.4f}" if value is not None else f"  {key:12s}: N/A")
 
 def print_per_attack_block(title: str, rows: dict) -> None:
+    """Print per-attack-type detection counts and rates."""
     print(f"[*] {title}")
     if not rows:
         print("  none")
@@ -65,6 +72,7 @@ def print_per_attack_block(title: str, rows: dict) -> None:
         )
 
 def print_artifacts(*, model_path: str, summary_path: str, extras: dict | None = None) -> None:
+    """Print paths to saved model and summary artifacts after a training run."""
     print("[+] Saved artifacts")
     print(f"  model   : {model_path}")
     print(f"  summary : {summary_path}")
