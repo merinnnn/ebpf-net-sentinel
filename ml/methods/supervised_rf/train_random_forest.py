@@ -41,6 +41,7 @@ def prepare_data(df):
     return X[numeric], (df['is_attack'] == 1).astype(int), df['label_family'].astype(str)
 
 def evaluate(y_true, y_pred, y_prob=None):
+    """Compute accuracy, precision, recall, F1, and optionally ROC-AUC and PR-AUC."""
     m = {
         'accuracy':  float(accuracy_score(y_true, y_pred)),
         'precision': float(precision_score(y_true, y_pred, zero_division=0)),
@@ -57,6 +58,7 @@ def evaluate(y_true, y_pred, y_prob=None):
     return m
 
 def per_attack(labels, y_true, y_pred):
+    """Return detection count and rate for each attack family in the test set."""
     r = {}
     for a in sorted(labels.unique()):
         if a == "BENIGN":
@@ -78,6 +80,7 @@ def tune_threshold_on_val(y_val, y_prob_val):
     return float(best), float(max(f1s))
 
 def plot_cm(cm, out):
+    """Save a normalised confusion matrix PNG to out."""
     plt.figure(figsize=(8, 6))
     cm_n = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
     plt.imshow(cm_n, cmap='Blues')
@@ -97,6 +100,7 @@ def plot_cm(cm, out):
     plt.close()
 
 def main():
+    """CLI entry point. Trains a Random Forest, tunes the decision threshold on val, and writes model + report."""
     p = argparse.ArgumentParser()
     p.add_argument("--splits_dir",       required=True)
     p.add_argument("--run_name",         required=True)
@@ -138,7 +142,7 @@ def main():
     print_split_summary("val",   len(X_val_raw),   int((y_val   == 1).sum()))
     print_split_summary("test",  len(X_test_raw),  int((y_test  == 1).sum()))
 
-    # Fit imputer on training only then reuse for val/test.
+    # Fit only on training data; applying the same statistics to val/test prevents leakage.
     imputer      = SimpleImputer(strategy="median")
     X_train      = imputer.fit_transform(X_train_raw)
     X_val        = imputer.transform(X_val_raw)
@@ -164,7 +168,7 @@ def main():
     y_test_prob  = rf.predict_proba(X_test)[:, 1]
     y_train_prob = rf.predict_proba(X_train)[:, 1]
 
-    # Choose the decision threshold from the validation split.
+    # Threshold is chosen on val so test metrics remain unseen during tuning.
     n_pos_val = int((y_val == 1).sum())
     if n_pos_val >= 10:
         best_thr, best_val_f1 = tune_threshold_on_val(y_val.to_numpy(), y_val_prob)
