@@ -1011,6 +1011,9 @@ def normalise_event(ev: dict) -> dict:
         except (TypeError, ValueError): out["proto"] = str(proto or "TCP").upper()
     return out
 
+# 512 KB per poll, ~1 000 events, keeps UI responsive
+_READ_CHUNK_BYTES = 512 * 1024
+
 def read_file_events(path: str, offset: int) -> tuple[list[dict], int]:
     """Read new JSONL events from path starting at byte offset; return (events, new_offset)."""
     p = resolve_repo_path(path)
@@ -1024,7 +1027,7 @@ def read_file_events(path: str, offset: int) -> tuple[list[dict], int]:
         return [], offset
     with open(p, "rb") as f:
         f.seek(offset)
-        chunk = f.read()
+        chunk = f.read(_READ_CHUNK_BYTES)
     if not chunk:
         return [], offset
     # Only consume up to the last complete newline so a partial write at the boundary
@@ -1257,8 +1260,12 @@ if S.source == "Live":
     runtime_state = load_runtime_state()
 capture_running = live_capture_is_running(runtime_state)
 
+_just_cleared = bool(S.get("_just_cleared", False))
+S._just_cleared = False  # consume the flag immediately
+
 if (
-    S.source in {"Live", "File"}
+    not _just_cleared
+    and S.source in {"Live", "File"}
     and S.file_path
     and (
         S.loaded_path != S.file_path
@@ -1338,10 +1345,9 @@ with st.sidebar:
         if st.button("Clear", use_container_width=True):
             S.events = []; S.total_flows = 0; S.total_anom = 0
             S.threat_counts = {}; S.graph_points = []
-            S.file_offset = 0; S.start_time = time.time()
-            S.loaded_path = ""
-            S.loaded_model = ""
-            S.loaded_threshold = None
+            S.file_offset = tail_offset_for_path(S.file_path)
+            S.start_time = time.time()
+            S._just_cleared = True  # suppress rebuild on next rerun
             st.rerun()
 
     # Source
@@ -1796,5 +1802,9 @@ if S.is_live:
         should_refresh = bool(S.file_path)
 
 if should_refresh:
-    time.sleep(S.poll_interval)
+    # If a full chunk is consumed, there is more data pending.
+    # Skip the sleep so catch-up runs as fast as possible.
+    pending = resolve_repo_path(S.file_path).stat().st_size > S.file_offset if S.file_path else False
+    if not pending:
+        time.sleep(S.poll_interval)
     st.rerun()

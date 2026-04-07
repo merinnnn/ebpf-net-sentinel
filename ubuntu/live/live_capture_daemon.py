@@ -2,6 +2,8 @@
 
 import argparse
 import csv
+import io
+import ipaddress
 import json
 import os
 import shutil
@@ -151,6 +153,8 @@ class LiveScorer:
         self.paths = paths
         self.threshold_multiplier = threshold_multiplier
         self.last_scored_rows = 0
+        self._merged_csv_offset = 0
+        self._merged_csv_header: list[str] = []
         self.enabled = False
         self.message = "live scoring unavailable"
         self.baseline_pack: dict | None = None
@@ -313,22 +317,52 @@ class LiveScorer:
         if not self.enabled or not self.paths.merged_csv.exists():
             return False
 
-        merged = pd.read_csv(self.paths.merged_csv)
-        total_rows = len(merged)
-        if total_rows == 0:
+        path = self.paths.merged_csv
+        file_size = path.stat().st_size
+        if file_size == 0:
             return False
 
-        mode = "a"
-        start_idx = self.last_scored_rows
-        if force_reset or total_rows < self.last_scored_rows:
-            start_idx = 0
-            mode = "w"
+        if force_reset or file_size < self._merged_csv_offset:
+            self._merged_csv_offset = 0
+            self._merged_csv_header = []
+            self.last_scored_rows = 0
 
-        if total_rows <= start_idx:
+        if self._merged_csv_offset == file_size:
             return False
 
-        new_rows = merged.iloc[start_idx:].copy()
-        self.last_scored_rows = total_rows
+        mode = "a" if self._merged_csv_offset > 0 else "w"
+
+        with open(path, "rb") as fh:
+            fh.seek(self._merged_csv_offset)
+            chunk = fh.read()
+
+        if not chunk:
+            return False
+
+        # Only consume complete lines to avoid partial-row parsing.
+        last_nl = chunk.rfind(b"\n")
+        if last_nl < 0:
+            return False
+        complete = chunk[: last_nl + 1].decode(errors="replace")
+        new_offset = self._merged_csv_offset + last_nl + 1
+
+        try:
+            if self._merged_csv_offset == 0:
+                # First read: file contains header + data rows.
+                new_rows = pd.read_csv(io.StringIO(complete))
+                self._merged_csv_header = list(new_rows.columns)
+            else:
+                # Subsequent reads: no header in chunk, apply saved column names.
+                new_rows = pd.read_csv(io.StringIO(complete), header=None,
+                                       names=self._merged_csv_header)
+        except Exception:
+            return False
+
+        if new_rows.empty:
+            return False
+
+        self._merged_csv_offset = new_offset
+        self.last_scored_rows += len(new_rows)
 
         # Drop multicast/broadcast destinations; the models were not trained on them and they produce false ATTACK labels.
         dst_str = new_rows.get("resp_h", pd.Series(dtype=str)).astype(str)
@@ -425,11 +459,13 @@ class LiveCaptureDaemon:
         self._ebpf_line_count: int = 0
 
         # Incremental Zeek conn.log reader state.
-        # _zeek_csv_rows_merged tracks how many conn.csv 
-        # rows have been merged so each poll only processes newly appended rows.
         self._zeek_log_offset: int = 0
         self._zeek_csv_rows: int = 0
         self._zeek_csv_rows_merged: int = 0
+
+        # Byte offset into conn.csv so refresh_merged_csv reads only new rows rather than re-reading the entire file on every poll cycle.
+        self._conn_csv_offset: int = 0
+        self._conn_csv_header: list[str] = []
 
         self.scorer = LiveScorer(REPO, self.paths, threshold_multiplier=self._threshold_multiplier)
 
@@ -721,16 +757,76 @@ class LiveCaptureDaemon:
 
         ebpf_df = self._load_ebpf_incremental()
 
+        # Read only new bytes from conn.csv using a byte offset.
+        conn_path = self.paths.zeek_conn_csv
+        conn_size = conn_path.stat().st_size
+
+        if force or conn_size < self._conn_csv_offset:
+            self._conn_csv_offset = 0
+            self._conn_csv_header = []
+
         try:
-            zeek_all = load_zeek_conn(str(self.paths.zeek_conn_csv))
-        except Exception as exc:
-            append_log(f"zeek conn.csv load error: {exc}")
+            with open(conn_path, "rb") as fh:
+                fh.seek(self._conn_csv_offset)
+                chunk = fh.read()
+        except OSError as exc:
+            append_log(f"zeek conn.csv read error: {exc}")
             self.last_merge_ok = False
             return False
 
-        start_idx = self._zeek_csv_rows_merged if not force else 0
-        new_zeek = zeek_all.iloc[start_idx:].copy()
+        if not chunk:
+            self.last_agg_mtime_ns = agg_stat.st_mtime_ns
+            self.last_conn_csv_mtime_ns = conn_csv_mtime
+            return False
+
+        last_nl = chunk.rfind(b"\n")
+        if last_nl < 0:
+            return False
+        complete = chunk[: last_nl + 1].decode(errors="replace")
+        new_conn_offset = self._conn_csv_offset + last_nl + 1
+
+        try:
+            if self._conn_csv_offset == 0:
+                new_zeek_raw = pd.read_csv(io.StringIO(complete))
+                self._conn_csv_header = list(new_zeek_raw.columns)
+            else:
+                new_zeek_raw = pd.read_csv(io.StringIO(complete), header=None,
+                                           names=self._conn_csv_header)
+        except Exception as exc:
+            append_log(f"zeek conn.csv parse error: {exc}")
+            self.last_merge_ok = False
+            return False
+
+        try:
+            # Apply the same normalisations load_zeek_conn does, in-place.
+            new_zeek_raw["orig_p"] = pd.to_numeric(new_zeek_raw["orig_p"], errors="coerce").fillna(0).astype(int)
+            new_zeek_raw["resp_p"] = pd.to_numeric(new_zeek_raw["resp_p"], errors="coerce").fillna(0).astype(int)
+            new_zeek_raw["ts"]     = pd.to_numeric(new_zeek_raw["ts"],     errors="coerce").fillna(0.0)
+            new_zeek_raw["duration"] = pd.to_numeric(new_zeek_raw["duration"], errors="coerce").fillna(0.0)
+            for c in ["orig_bytes", "resp_bytes", "orig_pkts", "resp_pkts"]:
+                new_zeek_raw[c] = pd.to_numeric(new_zeek_raw[c], errors="coerce").fillna(0.0)
+            new_zeek_raw["proto"] = new_zeek_raw["proto"].astype(str).str.upper()
+            proto_map = {"TCP": 6, "UDP": 17}
+            new_zeek_raw["proto_num"] = new_zeek_raw["proto"].map(proto_map).fillna(0).astype(int)
+            new_zeek_raw["start_ts"]  = new_zeek_raw["ts"]
+            new_zeek_raw["end_ts"]    = new_zeek_raw["ts"] + new_zeek_raw["duration"]
+            def _ip32(ip):
+                try:
+                    return int(ipaddress.IPv4Address(str(ip).strip()))
+                except Exception:
+                    return pd.NA
+            new_zeek_raw["orig_ip_u32"] = new_zeek_raw["orig_h"].apply(_ip32)
+            new_zeek_raw["resp_ip_u32"] = new_zeek_raw["resp_h"].apply(_ip32)
+            new_zeek = new_zeek_raw.dropna(subset=["orig_ip_u32", "resp_ip_u32"]).copy()
+            new_zeek["orig_ip_u32"] = new_zeek["orig_ip_u32"].astype("uint32")
+            new_zeek["resp_ip_u32"] = new_zeek["resp_ip_u32"].astype("uint32")
+        except Exception as exc:
+            append_log(f"zeek conn.csv normalise error: {exc}")
+            self.last_merge_ok = False
+            return False
+
         if new_zeek.empty:
+            self._conn_csv_offset = new_conn_offset
             self.last_agg_mtime_ns = agg_stat.st_mtime_ns
             self.last_conn_csv_mtime_ns = conn_csv_mtime
             return False
@@ -768,7 +864,7 @@ class LiveCaptureDaemon:
         try:
             new_merged = pd.read_csv(str(tmp_out))
             tmp_out.unlink(missing_ok=True)
-            write_header = not self.paths.merged_csv.exists() or start_idx == 0
+            write_header = not self.paths.merged_csv.exists() or self._conn_csv_offset == 0
             new_merged.to_csv(
                 self.paths.merged_csv,
                 mode="w" if write_header else "a",
@@ -776,6 +872,7 @@ class LiveCaptureDaemon:
                 index=False,
             )
             self._zeek_csv_rows_merged = self._zeek_csv_rows
+            self._conn_csv_offset = new_conn_offset
         except Exception as exc:
             append_log(f"merged.csv write error: {exc}")
             tmp_out.unlink(missing_ok=True)
@@ -842,7 +939,11 @@ class LiveCaptureDaemon:
             )
 
             converted = self.refresh_zeek_csv()
+            if self.stop_requested:
+                break
             merged = self.refresh_merged_csv()
+            if self.stop_requested:
+                break
             scored = False
             if merged or (self.paths.merged_csv.exists() and self.scorer.last_scored_rows == 0):
                 try:
