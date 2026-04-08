@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dual-eval split: produces a balanced test set (fixed per-class quota) and a realistic test set (held-out day)."""
+"""Dual-eval split: balanced test set (per-class quota) and realistic test set (held-out day)."""
 
 import argparse
 import json

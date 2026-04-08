@@ -20,12 +20,7 @@ BENIGN_LIKE = frozenset({"BENIGN", "Unknown", "nan", "NaN", ""})
 
 
 def _iter_repeated_splits(groups, y_grp, n_splits: int, n_repeats: int, seed: int):
-    """
-    Yield repeated fold indices with stratification when feasible.
-
-    Falls back to repeated shuffled KFold if any dominant-label class has fewer
-    groups than n_splits.
-    """
+    """Yield repeated fold indices with stratification, falling back to shuffled KFold if needed."""
     n_groups  = len(groups)
     if n_groups < 2:
         raise ValueError(f"Need at least 2 groups for k-fold, got {n_groups}.")
@@ -67,10 +62,7 @@ def run(
     batch_size: int        = 131072,
     write_test_parquet: bool = False,
 ):
-    """
-    Notebook entry point. Accepts a DataFrame (legacy) or in_parquet path.
-    When out_dir is None, uses a temp directory.
-    """
+    """Notebook entry point; accepts a DataFrame or in_parquet path, defaulting out_dir to a temp directory."""
     import tempfile, os as _os
 
     if df_or_parquet is not None and hasattr(df_or_parquet, "to_parquet"):
@@ -109,12 +101,7 @@ def run_streaming(
     batch_size: int        = 131072,
     write_test_parquet: bool = False,
 ) -> dict:
-    """
-    Materialize fold train/test DataFrames for notebook workflows.
-
-    Heavier than the metadata-only path below because it rebuilds full tables for
-    every fold. Kept for notebook compatibility.
-    """
+    """Materialise fold DataFrames for notebook workflows; heavier than the metadata-only path."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -203,10 +190,7 @@ def run_metadata_streaming(
     seed: int      = 104,
     batch_size: int = 131072,
 ) -> dict:
-    """
-    Memory-safe k-fold run that computes per-fold metadata without materializing DataFrames.
-    Returns {"folds": [], "meta": {...}} where meta["folds"] has per-fold stats.
-    """
+    """Memory-safe k-fold run computing per-fold metadata without materialising DataFrames."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -295,10 +279,7 @@ def _dom_label_from_counter(counter: dict) -> str:
     return "BENIGN"
 
 def build_group_table(in_parquet: str, batch_size: int):
-    """
-    Build one row per (orig_h, resp_h) group with its dominant label and size.
-    This compact table is the only structure the fold generator needs in memory.
-    """
+    """Build a compact per-(orig_h, resp_h) group table with dominant label and row count."""
     counters = defaultdict(lambda: defaultdict(int))
     sizes    = defaultdict(int)
 
@@ -322,10 +303,7 @@ def build_group_table(in_parquet: str, batch_size: int):
     return pd.DataFrame({"group": groups, "dom_label": y, "n_rows": n})
 
 def maybe_write_fold_tests(in_parquet: str, out_dir: Path, folds: list, batch_size: int):
-    """
-    Optionally write each fold's test.parquet by streaming and filtering groups.
-    Train parquets are intentionally omitted to save disk space and runtime.
-    """
+    """Write each fold's test.parquet by streaming groups; train parquets are omitted to save space."""
     pf     = pq.ParquetFile(in_parquet)
     schema = None
 

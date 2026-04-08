@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Balanced-quota split: reservoir-samples a fixed per-class quota then splits stratified 70/15/15."""
+"""Balanced-quota split: reservoir-samples a per-class quota, then splits 70/15/15."""
 
 import argparse
 import json
@@ -147,12 +147,7 @@ def run_streaming(
     seed: int         = 104,
     batch_size: int   = 131072,
 ) -> dict:
-    """
-    Build the balanced-core sample in streaming mode and split into train/val/test.
-
-    Dataset is quota-capped per attack family, BENIGN is sampled to the requested
-    ratio, then the balanced core is split stratified.
-    """
+    """Stream-build a quota-balanced core dataset and split it stratified into train/val/test."""
     assert abs(train_frac + val_frac + test_frac - 1.0) < 1e-9
 
     rng = np.random.default_rng(seed)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Group-stratified split keeping all flows for a host pair in the same partition to prevent host-identity leakage."""
+"""Group-stratified split: all flows per host pair stay together to prevent host-identity leakage."""
 
 import argparse
 import json
@@ -27,7 +27,7 @@ def _iter_batches(parquet_path: str, batch_size: int, columns=None):
 
 
 def _dominant_label(s: pd.Series) -> str:
-    """Return the dominant label for a host-pair group. Attack labels take priority over BENIGN."""
+    """Return the dominant label for a group; attack labels take priority over BENIGN."""
     vc = s.astype(str).value_counts(dropna=False)
     for k, _v in vc.items():
         if str(k) not in BENIGN_LIKE:
@@ -98,7 +98,7 @@ def assign_groups_row_weighted(
     test_ratio: float,
     seed: int,
 ) -> Dict[str, List[int]]:
-    """Greedy row-weighted group assignment. Balances total rows per label, not just group count."""
+    """Greedy group assignment weighted by row count, not just group count."""
     rng  = np.random.default_rng(seed)
     grp  = grp.reset_index(drop=True)
     grp["_gid"] = grp.index.astype(int)
@@ -163,7 +163,7 @@ def write_splits_streaming(
     group_assign: Dict[str, List[int]],
     batch_size: int = 131072,
 ):
-    """Stream source parquet and write rows to train/val/test. All rows for a host pair go to the same split."""
+    """Stream source parquet and write rows to train/val/test, keeping host pairs together."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 

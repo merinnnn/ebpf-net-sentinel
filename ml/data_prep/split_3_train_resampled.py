@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resampled-train split: takes Split 1 output and rebalances only the training set via reservoir sampling."""
+"""Resampled-train split: rebalances the Split 1 training set via reservoir sampling."""
 
 import argparse
 import json
@@ -24,7 +24,7 @@ def run(
     seed: int         = 104,
     batch_size: int   = 131072,
 ):
-    """Notebook entry point. Rebalances Split-1 train, copies val/test, writes split_report.json."""
+    """Rebalance Split-1 train, copy val/test unchanged, and write split_report.json."""
     return write_split(
         split1_dir=str(split1_dir),
         out_dir=str(out_dir),
@@ -74,12 +74,7 @@ def resample_train_stream(
     seed: int         = 104,
     batch_size: int   = 131072,
 ) -> pd.DataFrame:
-    """
-    Rebalance the Split 1 training parquet while leaving evaluation data untouched.
-
-    Small families are kept in full and oversampled up to target_n. Larger families
-    are downsampled with a reservoir. BENIGN is sampled separately.
-    """
+    """Rebalance the Split 1 training parquet; small families are oversampled, large ones reservoir-downsampled."""
     rng = np.random.default_rng(seed)
 
     # Pass 1: count the current training distribution.
