@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
-"""
-RQ4: Computational trade-offs of eBPF-enhanced detection.
-
-Measures:
-  1) Dataset load and preprocessing time (baseline vs eBPF)
-  2) Model training time (baseline vs eBPF)
-  3) Saved-artifact inference latency under a canonical protocol
-  4) Optional: runtime overhead of the eBPF collector (netmon) via CPU/RSS sampling
-
-Outputs a JSON summary and an optional netmon sample CSV.
-Results depend on hardware; record CPU model, RAM, kernel, and dataset sizes in your report.
-"""
+"""Benchmark load, training, and inference overhead for baseline vs eBPF-enhanced detection."""
 
 import argparse, json, os, platform, sys, time
 from pathlib import Path
@@ -36,6 +25,7 @@ import psutil
 
 
 def read_split_parquet(splits_dir: Path, split_name: str) -> pd.DataFrame:
+    """Load a split parquet from splits_dir and return (DataFrame, load_time_seconds)."""
     p = splits_dir / f"{split_name}.parquet"
     if not p.exists():
         raise FileNotFoundError(f"Missing split parquet: {p}")
@@ -45,6 +35,7 @@ def read_split_parquet(splits_dir: Path, split_name: str) -> pd.DataFrame:
     return df, dt
 
 def build_preprocessor(df: pd.DataFrame, label_col: str) -> Tuple[Pipeline, list[str]]:
+    """Build a median-impute + standard-scale preprocessor pipeline for numeric columns."""
     feat_cols = [c for c in df.columns if c != label_col]
     num_cols = [c for c in feat_cols if pd.api.types.is_numeric_dtype(df[c])]
     other_cols = [c for c in feat_cols if c not in num_cols]
@@ -71,6 +62,7 @@ def fit_eval_model(
     label_col: str,
     out_dir: Path,
 ) -> Dict[str, Any]:
+    """Fit model on df_tr, score df_te, time both steps, and save the pipeline to out_dir."""
     out_dir.mkdir(parents=True, exist_ok=True)
 
     pre, feat_cols = build_preprocessor(df_tr, label_col)
@@ -86,7 +78,7 @@ def fit_eval_model(
     pipe.fit(Xtr, ytr)
     fit_s = time.perf_counter() - t0
 
-    # Time on up to 10k rows for stable measurement.
+    # Cap at 10k rows so the timing result is comparable across datasets of different sizes.
     n = min(len(Xte), 10_000)
     Xbench = Xte.iloc[:n]
     t0 = time.perf_counter()
@@ -136,6 +128,7 @@ def benchmark_saved_pack(
     sample_n: int = 10_000,
     repeats: int = 7,
 ) -> Dict[str, Any]:
+    """Benchmark load time and inference latency for a saved joblib model pack."""
     out_dir.mkdir(parents=True, exist_ok=True)
     t0 = time.perf_counter()
     pack = load(pack_path)
@@ -215,13 +208,14 @@ def benchmark_saved_pack(
     }
 
 def sample_process(pid: int, duration_s: int, interval_s: float, out_csv: Path) -> Dict[str, Any]:
+    """Poll CPU and RSS usage of a running process and write to out_csv."""
     if psutil is None:
         raise RuntimeError("psutil is not installed; pip install psutil")
 
     p = psutil.Process(pid)
     rows = []
     t_end = time.time() + duration_s
-    p.cpu_percent(interval=None)  # prime the CPU measurement
+    p.cpu_percent(interval=None)  # first call always returns 0; discard it to prime the counter
     while time.time() < t_end:
         ts = time.time()
         cpu = p.cpu_percent(interval=None)
@@ -244,6 +238,7 @@ def sample_process(pid: int, duration_s: int, interval_s: float, out_csv: Path) 
     }
 
 def main():
+    """CLI entry point. Benchmarks load, training, and inference overhead for both feature sets."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--baseline_splits_dir", type=Path, required=True)
     ap.add_argument("--ebpf_splits_dir", type=Path, required=True)
