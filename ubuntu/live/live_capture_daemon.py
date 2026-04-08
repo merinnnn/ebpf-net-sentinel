@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 from sklearn.impute import SimpleImputer
 
-# Import merge helpers in-process to avoid Python+pandas startup overhead on every poll cycle.
+# Import merge helpers in-process to avoid pandas startup overhead on every poll cycle.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "data_collection"))
 from merge_zeek_ebpf import _process_ebpf_rows, load_zeek_conn, run_merge  # noqa: E402
 
@@ -47,7 +47,7 @@ STATE_PATH = RUNTIME_DIR / "live_capture_state.json"
 DAEMON_LOG = RUNTIME_DIR / "live_capture_daemon.log"
 
 def write_json_atomic(path: Path, payload: dict) -> None:
-    """Write payload as JSON to a temp file then rename it atomically so readers never see a partial write."""
+    """Write payload as JSON atomically via temp-file rename to avoid partial reads."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -100,7 +100,7 @@ def run_sync(cmd: list[str], log_path: Path, *, cwd: Optional[Path] = None) -> s
         )
 
 def stop_process(proc: Optional[subprocess.Popen[str]], name: str, timeout_s: float = 8.0) -> None:
-    """Gracefully stop a subprocess: SIGINT first, then SIGTERM, then SIGKILL if it won't exit."""
+    """Stop a subprocess gracefully: SIGINT -> SIGTERM -> SIGKILL."""
     if proc is None or proc.poll() is not None:
         return
     append_log(f"stopping {name} pid={proc.pid}")
@@ -136,13 +136,10 @@ class LivePaths:
 
 PROTO_MAP = {"tcp": 6.0, "udp": 17.0, "icmp": 1.0}
 
-# Maximum eBPF flow entries kept in memory.
-# SYN floods can produce 600k+ entries per cycle; capping here prevents unbounded DataFrame growth.
-# Oldest entries are evicted first.
+# Max eBPF flow entries in memory; SYN floods can spike to 600k+ so cap prevents DataFrame bloat.
 _MAX_EBPF_CACHE = 50_000
 
-# Models were trained on CICIDS2017 replay data whose feature ranges differ from live traffic.
-# Scale replay-calibrated thresholds down by this factor for live capture.
+# CICIDS2017 replay feature ranges differ from live traffic; scale thresholds down.
 _DEFAULT_THRESHOLD_MULTIPLIER = float(os.environ.get("SCORE_THRESHOLD_MULTIPLIER", "0.1"))
 
 
@@ -173,7 +170,7 @@ class LiveScorer:
             raise RuntimeError(f"invalid model pack: {path}")
         self._repair_model_compat(model)
         raw_threshold = float(pack.get("threshold", 0.5))
-        # Models were trained on compressed PCAP replay; live traffic scores are lower, so the threshold is scaled down.
+        # Live scores are lower than replay; scale threshold down accordingly.
         live_threshold = raw_threshold * self.threshold_multiplier
         return {
             "path": path,
@@ -184,7 +181,7 @@ class LiveScorer:
         }
 
     def _repair_model_compat(self, obj: object) -> None:
-        """Fix missing dtype attributes on SimpleImputer when loading models across sklearn versions."""
+        """Fix missing dtype attributes on SimpleImputer across sklearn versions."""
         if isinstance(obj, SimpleImputer):
             dtype = getattr(obj, "_fit_dtype", None) or getattr(obj, "_fill_dtype", None)
             if dtype is None and hasattr(obj, "statistics_"):
@@ -208,7 +205,7 @@ class LiveScorer:
                     self._repair_model_compat(step)
 
     def _load_models(self) -> None:
-        """Attempt to load baseline and eBPF model packs; disable scoring if either is unavailable."""
+        """Load baseline and eBPF model packs; disable scoring if either is unavailable."""
         try:
             self.baseline_pack = self._load_pack("baseline")
             self.ebpf_pack = self._load_pack("ebpf")
@@ -231,7 +228,7 @@ class LiveScorer:
         return payload
 
     def _resolve_exe(self, pid: int, comm: str) -> str:
-        """Resolve the full exe path via /proc/<pid>/exe. Falls back to comm if the process is gone."""
+        """Resolve exe path via /proc/<pid>/exe, falling back to comm."""
         if pid <= 0:
             return comm
         try:
@@ -313,7 +310,7 @@ class LiveScorer:
         return score, pred
 
     def score_new_rows(self, *, force_reset: bool = False) -> bool:
-        """Score only the rows added to merged.csv since the last call and append results to scored_events.jsonl."""
+        """Score rows added to merged.csv since the last call and append to scored_events.jsonl."""
         if not self.enabled or not self.paths.merged_csv.exists():
             return False
 
@@ -364,7 +361,7 @@ class LiveScorer:
         self._merged_csv_offset = new_offset
         self.last_scored_rows += len(new_rows)
 
-        # Drop multicast/broadcast destinations; the models were not trained on them and they produce false ATTACK labels.
+        # Drop multicast/broadcast destinations; untrained on these, they cause false ATTACK labels.
         dst_str = new_rows.get("resp_h", pd.Series(dtype=str)).astype(str)
         noise_mask = dst_str.str.match(
             r"^(2(?:2[4-9]|3\d)\.|255\.255\.255\.255|[Ff][Ff][0-9a-fA-F]{2}:)"
@@ -416,7 +413,7 @@ class LiveScorer:
 class LiveCaptureDaemon:
     def __init__(self, iface: str, flush_secs: int, poll_secs: float, mode: str,
                  disable_kprobes: bool, threshold_multiplier: float = _DEFAULT_THRESHOLD_MULTIPLIER):
-        """Set up all run paths, incremental reader state, and the LiveScorer for this capture session."""
+        """Set up run paths, incremental reader state, and the LiveScorer."""
         self.iface = iface
         self.flush_secs = flush_secs
         self.poll_secs = poll_secs
@@ -463,14 +460,14 @@ class LiveCaptureDaemon:
         self._zeek_csv_rows: int = 0
         self._zeek_csv_rows_merged: int = 0
 
-        # Byte offset into conn.csv so refresh_merged_csv reads only new rows rather than re-reading the entire file on every poll cycle.
+        # Byte offset into conn.csv so only new rows are read on each poll cycle.
         self._conn_csv_offset: int = 0
         self._conn_csv_header: list[str] = []
 
         self.scorer = LiveScorer(REPO, self.paths, threshold_multiplier=self._threshold_multiplier)
 
     def write_state(self, status: str, message: str, **extra: object) -> None:
-        """Write the current daemon status, counters, and paths atomically to the shared state JSON file."""
+        """Write daemon status, counters, and paths atomically to the shared state JSON file."""
         payload = {
             "status": status,
             "interface": self.iface,
@@ -518,7 +515,7 @@ class LiveCaptureDaemon:
         return bin_path, obj_path
 
     def start_zeek(self) -> None:
-        """Start a Zeek live capture process on the configured interface with JSON output enabled."""
+        """Start a Zeek live capture process on the configured interface."""
         # Reduce inactivity timeout from the 5 min default so that 
         # long-lived or flood connections appear in conn.log well within 
         # a minute of the last packet.
@@ -541,7 +538,7 @@ class LiveCaptureDaemon:
         )
 
     def start_netmon(self, bin_path: Path, obj_path: Path) -> None:
-        """Launch the netmon eBPF collector as a background process on the configured interface."""
+        """Launch netmon as a background eBPF collector on the configured interface."""
         cmd = [
             str(bin_path),
             "-obj", str(obj_path),
@@ -568,12 +565,7 @@ class LiveCaptureDaemon:
         )
 
     def _load_ebpf_incremental(self) -> pd.DataFrame:
-        """
-        Read only newly-appended lines from ebpf_agg.jsonl each poll cycle.
-
-        Maintains an accumulated deduplicated DataFrame so that a SYN flood only incurs full-file I/O on the first read; 
-        subsequent polls parse only the delta.
-        """
+        """Read only newly-appended ebpf_agg.jsonl lines and maintain a deduplicated accumulated DataFrame."""
         if not self.paths.ebpf_agg.exists():
             return self._ebpf_cache_df
 
@@ -617,7 +609,7 @@ class LiveCaptureDaemon:
         combined = new_df if self._ebpf_cache_df.empty else pd.concat([self._ebpf_cache_df, new_df], ignore_index=True)
 
         # Deduplicate by 5-tuple, keeping the entry with the most samples.
-        # High-throughput flows (iperf3, SYN floods) can flush thousands of entries and cause a one-to-many join explosion in the merge step.
+        # High-throughput flows (iperf3, SYN floods) flush thousands of entries causing join explosion.
         key_cols = ["saddr_u32", "daddr_u32", "sport", "dport", "proto"]
         valid_keys = [c for c in key_cols if c in combined.columns]
         if valid_keys:
@@ -652,11 +644,7 @@ class LiveCaptureDaemon:
         return self._ebpf_cache_df
 
     def _get_nested(self, obj: dict, dotted_path: str) -> object:
-        """Resolve a key from a Zeek JSON record.
-
-        Zeek JSON uses literal flat keys with dots (e.g. "id.orig_h"), not nested dicts.
-        Try the full dotted path as a literal key first and fall back to nested traversal.
-        """
+        """Resolve a flat dotted key or nested path from a Zeek JSON record."""
         if dotted_path in obj:
             return obj[dotted_path]
         parts = dotted_path.split(".")
@@ -668,10 +656,7 @@ class LiveCaptureDaemon:
         return cur
 
     def refresh_zeek_csv(self, force: bool = False) -> bool:
-        """Parse only newly-appended JSON lines from Zeek's conn.log.
-
-        New rows are appended to conn.csv so each call is O(new_lines) rather than O(total_lines).
-        """
+        """Parse only newly-appended Zeek conn.log lines; O(new_lines) per call."""
         if not self.paths.zeek_conn_log.exists():
             return False
         stat = self.paths.zeek_conn_log.stat()
@@ -732,11 +717,7 @@ class LiveCaptureDaemon:
         return True
 
     def refresh_merged_csv(self, force: bool = False) -> bool:
-        """Merge only new Zeek rows against the eBPF cache and append results.
-
-        Both the merge computation and merged.csv writes are O(new_rows) per cycle
-        regardless of how many total flows have accumulated.
-        """
+        """Merge only new Zeek rows against the eBPF cache and append to merged.csv; O(new_rows) per cycle."""
         if not self.paths.zeek_conn_csv.exists() or not self.paths.ebpf_agg.exists():
             return False
         agg_stat = self.paths.ebpf_agg.stat()
@@ -833,7 +814,7 @@ class LiveCaptureDaemon:
 
         # Hold back flows younger than one eBPF flush cycle so the kprobe has time to
         # write its entry before the merge runs.
-        # Without this, a short-lived flow gets scored with pid=0/exe="" because its eBPF entry hasn't appeared yet.
+        # Without this, short-lived flows score with pid=0/exe="" before their eBPF entry appears.
         ebpf_ready_cutoff = time.time() - float(self.flush_secs)
         if "ts" in new_zeek.columns:
             new_zeek = new_zeek[
@@ -927,8 +908,7 @@ class LiveCaptureDaemon:
         while not self.stop_requested:
             self.check_children()
 
-            # Write a heartbeat before the blocking conversion steps so updated_at stays fresh even when run_sync() takes many seconds. 
-            # The UI uses updated_at to detect a stalled daemon.
+            # Heartbeat before blocking steps so updated_at stays fresh; UI uses it to detect stalls.
             self.write_state(
                 "running",
                 "capture running",

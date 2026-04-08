@@ -29,7 +29,7 @@ RUNTIME_STATE_PATH = REPO / "data" / "runtime" / "live_capture_state.json"
 DAEMON_LOG_PATH    = REPO / "data" / "runtime" / "live_capture_launcher.log"
 
 # Seconds updated_at may lag before the daemon is considered stalled.
-# The daemon can block in run_sync() for ~10-30s per cycle plus poll_secs, so be conservative.
+# Conservative: daemon can block in run_sync() for 10-30s plus poll_secs.
 _STALE_SECS = 90
 
 # Maximum graph data-points kept in session state.
@@ -708,7 +708,7 @@ def stop_live_capture() -> tuple[bool, str]:
     return True, f"Stop signal sent to pid {pid}."
 
 def maybe_autostart_live_capture() -> None:
-    """Auto-start live capture once if NETSENTINEL_AUTOSTART_LIVE_CAPTURE is set and not yet running."""
+    """Auto-start live capture once if NETSENTINEL_AUTOSTART_LIVE_CAPTURE is set."""
     if os.environ.get("NETSENTINEL_AUTOSTART_LIVE_CAPTURE","false").lower() not in {"1","true","yes","on"}:
         return
     if st.session_state.get("autostart_attempted"):
@@ -737,12 +737,7 @@ def resolve_repo_path(path_str: str) -> Path:
     return p if p.is_absolute() else (REPO / p).resolve()
 
 def _rebase_daemon_path(p_str: str) -> Path:
-    """
-    Rebase an absolute daemon path to the UI's REPO when it no longer resolves.
-
-    Both roots share the same relative layout under data/, so we locate the first
-    "data" component and reattach everything from there to REPO.
-    """
+    """Rebase an absolute daemon path to the UI's REPO by re-anchoring from the first 'data/' component."""
     p = Path(p_str)
     if p.exists():
         return p
@@ -773,7 +768,7 @@ def default_live_event_path() -> str:
     return ""
 
 def resolve_live_event_path(rt: dict) -> str:
-    """Return the resolved scored events path from runtime state, falling back to the default."""
+    """Return the scored events path from runtime state, falling back to the default."""
     raw = rt.get("scored_events_path")
     if raw:
         p = _rebase_daemon_path(raw)
@@ -1015,7 +1010,7 @@ def normalise_event(ev: dict) -> dict:
 _READ_CHUNK_BYTES = 512 * 1024
 
 def read_file_events(path: str, offset: int) -> tuple[list[dict], int]:
-    """Read new JSONL events from path starting at byte offset; return (events, new_offset)."""
+    """Read new JSONL events from path at byte offset; return (events, new_offset)."""
     p = resolve_repo_path(path)
     if not p.exists():
         # Daemon is still starting; preserve offset so we don't rewind to 0 once the file appears.
@@ -1140,12 +1135,7 @@ def daemon_start_epoch(rt: dict) -> float | None:
         return None
 
 def rebuild_state_from_file(path: str, populate_graph: bool = True) -> None:
-    """
-    Read the event file from the start to rebuild cumulative counters.
-
-    populate_graph=False is used in Live mode: historical flows are counted for the stat strip 
-    but not loaded into graph_points, so the live chart starts fresh from now without a spike on first render.
-    """
+    """Reread the event file from the start to rebuild all cumulative counters and the event list."""
     resolved = resolve_repo_path(path)
     if not resolved.exists():
         S.events = []
@@ -1199,7 +1189,7 @@ def rebuild_state_from_file(path: str, populate_graph: bool = True) -> None:
     S.loaded_threshold = float(S.threshold)
 
 def ingest(evs: list[dict]):
-    """Append new events to session state counters, graph points, and the rolling event list."""
+    """Append new events to session counters, graph points, and the rolling event list."""
     if not evs:
         return
     S.total_flows += len(evs)
