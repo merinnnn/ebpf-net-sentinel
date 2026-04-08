@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""
-Produces four output splits, all streaming (no full dataset in RAM):
-  train          : Mon-Wed, excluding rows sampled into test_balanced
-  val            : Thu untouched
-  test_realistic : Fri untouched
-  test_balanced  : quota-sampled per attack family across all days (+ BENIGN ratio)
-"""
+"""Dual-eval split: produces a balanced test set (fixed per-class quota) and a realistic test set (held-out day)."""
 
 import argparse
 import json
@@ -173,6 +167,7 @@ def write_split(
     }
 
 def main():
+    """CLI entry point. Parses arguments and runs the dual-eval split builder."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--in_parquet",         required=True)
     ap.add_argument("--out_dir",            required=True)

@@ -1,17 +1,5 @@
 #!/usr/bin/env python3
-"""
-Repeated CV over session groups (src, dst) to reduce session leakage.
-Mainly used for statistical stability checks.
-
-This version avoids materialising full train+test parquet for every fold (the main
-OOM/disk issue in the previous implementation). Instead it:
-  - streams the dataset to build a group table (no full df in RAM)
-  - computes repeated stratified folds over groups
-  - writes only folds.json (group lists) and folds_meta.json (per-fold diagnostics)
-  - optionally writes each fold's test.parquet if --write_test_parquet is passed
-
-Train can be defined as "all rows not in test groups" from the stored group lists.
-"""
+"""Repeated group k-fold split over (src, dst) session groups to reduce session leakage."""
 
 import argparse
 import json
@@ -364,6 +352,7 @@ def maybe_write_fold_tests(in_parquet: str, out_dir: Path, folds: list, batch_si
             writer.close()
 
 def main():
+    """CLI entry point. Parses arguments and runs the repeated k-fold split builder."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--in_parquet",        required=True)
     ap.add_argument("--out_dir",           required=True)

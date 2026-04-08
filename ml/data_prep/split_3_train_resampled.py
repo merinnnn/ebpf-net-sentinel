@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""
-Takes Split 1 output and rebalances only the training set.
-Val and test are passed through untouched (file copy).
-
-Memory-safe: streams Split-1 train.parquet in batches.
-Small families are kept in full then oversampled; large families use reservoir downsampling.
-
-Outputs: train.parquet (rebalanced), val.parquet (copied), test.parquet (copied), split_report.json
-"""
+"""Resampled-train split: takes Split 1 output and rebalances only the training set via reservoir sampling."""
 
 import argparse
 import json
@@ -223,6 +215,7 @@ def make_report(train_df: pd.DataFrame, val_parquet: str, test_parquet: str, bat
     return rep
 
 def main():
+    """CLI entry point. Parses arguments and runs the train-resampled split builder."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--split1_dir",    required=True,
                     help="Split 1 output directory containing train/val/test.parquet")

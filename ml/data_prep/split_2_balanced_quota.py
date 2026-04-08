@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
-"""
-Builds a balanced-core dataset then splits it stratified 70/15/15.
-
-Intended for clean confusion matrices and macro-F1 comparisons under balanced
-class proportions. Not leakage-controlled by design; use Split 1 for that.
-
-Memory-safe: streams Parquet in batches with per-class reservoir sampling
-so RAM stays proportional to quota x num_classes, not dataset size.
-
-Outputs: train.parquet, val.parquet, test.parquet, split_report.json
-"""
+"""Balanced-quota split: reservoir-samples a fixed per-class quota then splits stratified 70/15/15."""
 
 import argparse
 import json
@@ -286,6 +276,7 @@ def write_split(
     return out
 
 def main():
+    """CLI entry point. Parses arguments and runs the balanced-quota split builder."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--in_parquet",    required=True)
     ap.add_argument("--out_dir",       required=True)

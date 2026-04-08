@@ -1,17 +1,5 @@
 #!/usr/bin/env python3
-"""
-Split 1: leakage diagnostic grouped on (orig_h, resp_h).
-
-All flows for a host pair stay in the same partition, preventing host-identity leakage.
-Dominant label: attack wins over benign if any attack rows exist in the group.
-Two-pass streaming: pass 1 builds the group table, pass 2 writes parquet splits.
-
-Limitation: stratification is by group count, not row volume. Val/test may have very
-few attack rows when attack traffic is concentrated in a few large groups.
-Use this split for leakage diagnostics only; use Split 2/4 for model selection.
-
-Outputs: train.parquet, val.parquet, test.parquet, split_report.json
-"""
+"""Group-stratified split keeping all flows for a host pair in the same partition to prevent host-identity leakage."""
 
 import argparse
 import json
@@ -286,6 +274,7 @@ def run(
 
 
 def main():
+    """CLI entry point. Parses arguments and runs the group-stratified split builder."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--in_parquet",   required=True)
     ap.add_argument("--out_dir",      required=True)
