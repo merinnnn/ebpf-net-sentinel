@@ -102,7 +102,7 @@ def plot_confusion(cm: np.ndarray, labels: list, out_png: str):
 
 def evaluate_binary(y_true: np.ndarray, y_pred: np.ndarray,
                     y_scores: np.ndarray = None):
-    """Compute accuracy, precision, recall, F1, and optionally ROC-AUC from binary predictions."""
+    """Compute accuracy, precision, recall, F1, and optionally ROC-AUC for binary predictions."""
     metrics = {
         "accuracy":  float(accuracy_score(y_true, y_pred)),
         "precision": float(precision_score(y_true, y_pred, zero_division=0)),
@@ -161,7 +161,7 @@ def tune_contamination_on_val(pre, X_train_benign, X_val, y_val,
     return best_c
 
 def main():
-    """CLI entry point. Trains an Isolation Forest on benign-only rows, tunes contamination and threshold, and writes model + report."""
+    """CLI entry point. Trains an Isolation Forest on benign rows, tunes threshold, and writes model + report."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--splits_dir",       required=True)
     ap.add_argument("--run_name",         required=True)
@@ -243,7 +243,7 @@ def main():
     print("[*] Training")
     pipe.fit(X_train_benign)
 
-    # decision_function returns lower values for anomalies; negate it so higher means more suspicious.
+    # Negate decision_function so higher score means more suspicious.
     def get_scores(X):
         return -pipe.decision_function(X)
 
@@ -263,7 +263,7 @@ def main():
             f"best_val_f1      : {max(f1s):.4f}",
         ]
     else:
-        # Fallback: use 90th-percentile of training scores so ~10% of benign traffic would be flagged.
+        # Fallback: 90th-percentile flags ~10% of benign training traffic.
         best_thr = float(np.percentile(scores_train, 90))
         threshold_lines = [
             "strategy         : fallback train-score percentile",

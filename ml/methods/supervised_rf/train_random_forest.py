@@ -100,7 +100,7 @@ def plot_cm(cm, out):
     plt.close()
 
 def main():
-    """CLI entry point. Trains a Random Forest, tunes the decision threshold on val, and writes model + report."""
+    """CLI entry point. Trains a Random Forest, tunes threshold on val, and writes model + report."""
     p = argparse.ArgumentParser()
     p.add_argument("--splits_dir",       required=True)
     p.add_argument("--run_name",         required=True)
