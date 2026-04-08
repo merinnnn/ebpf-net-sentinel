@@ -27,6 +27,7 @@ FIELDS_JSON = {
 }
 
 def detect_format(p: Path) -> str:
+    """Detect whether the file is JSON or TSV."""
     with p.open("r", encoding="utf-8", errors="replace") as f:
         for line in f:
             s = line.strip()
@@ -39,6 +40,7 @@ def detect_format(p: Path) -> str:
     return "tsv"
 
 def parse_json(in_path: Path, out_path: Path) -> int:
+    """Convert a Zeek JSON conn.log to a normalised CSV and return the row count."""
     n = 0
     with in_path.open("r", encoding="utf-8", errors="replace") as fin, out_path.open("w", newline="") as fout:
         w = csv.DictWriter(fout, fieldnames=FIELDS_OUT)
@@ -54,6 +56,7 @@ def parse_json(in_path: Path, out_path: Path) -> int:
     return n
 
 def parse_tsv(in_path: Path, out_path: Path) -> int:
+    """Convert a Zeek TSV conn.log (with #fields header) to a normalised CSV and return the row count."""
     fields = None
     sep = "\t"
     n = 0
@@ -106,6 +109,7 @@ def parse_tsv(in_path: Path, out_path: Path) -> int:
     return n
 
 def main():
+    """CLI entry point. Auto-detects format and converts a Zeek conn.log to CSV."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--in", dest="in_path", required=True)
     ap.add_argument("--out", dest="out_path", required=True)

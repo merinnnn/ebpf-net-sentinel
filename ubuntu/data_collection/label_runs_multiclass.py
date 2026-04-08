@@ -9,6 +9,9 @@ from typing import List, Tuple, Optional
 
 import pandas as pd
 
+import pyarrow as pa
+import pyarrow.parquet as pq
+
 PROTO_MAP = {"tcp": 6, "udp": 17, "icmp": 1}
 
 DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
@@ -16,6 +19,7 @@ HALFDAY_SHIFTS = [0, 43200, -43200]
 
 
 def norm_day_from_path(s: str) -> str:
+    """Extract the CICIDS2017 weekday name from a file path, or 'Unknown' if none matches."""
     s = os.path.basename(str(s)).lower()
     for d in DAYS:
         if d.lower() in s:
@@ -23,6 +27,7 @@ def norm_day_from_path(s: str) -> str:
     return "Unknown"
 
 def label_family(label: str) -> str:
+    """Map CICIDS2017 label string to an attack-family."""
     if label is None:
         return "Unknown"
     x = str(label).strip().lower()
@@ -47,6 +52,7 @@ def label_family(label: str) -> str:
     return "Other"
 
 def read_csv_robust(fp: str, usecols=None) -> pd.DataFrame:
+    """Read a CSV file with different encodings."""
     for enc in ("utf-8", "cp1252", "latin1"):
         try:
             return pd.read_csv(fp, low_memory=False, encoding=enc, usecols=usecols)
@@ -55,6 +61,7 @@ def read_csv_robust(fp: str, usecols=None) -> pd.DataFrame:
     return pd.read_csv(fp, low_memory=False, encoding="latin1", usecols=usecols)
 
 def parse_cicids_timestamp_series(ts: pd.Series) -> pd.Series:
+    """Parse CICIDS2017 timestamp strings to Unix seconds (day-first then month-first format)."""
     s = ts.astype(str).str.strip()
     dt1 = pd.to_datetime(s, errors="coerce", dayfirst=True)
     ok1 = int(dt1.notna().sum())
@@ -67,7 +74,7 @@ def parse_cicids_timestamp_series(ts: pd.Series) -> pd.Series:
 def maybe_shift_afternoon_filename_12h(df: pd.DataFrame, src_fp: str) -> pd.DataFrame:
     """
     CICIDS2017 Afternoon CSVs can encode 1pm-5pm as 1:00-5:00 (no AM/PM).
-    If the filename contains 'Afternoon' and the median hour < 12, shift by +12h.
+    If filename contains 'Afternoon' and median hour < 12, shift by +12h.
     """
     base = os.path.basename(src_fp).lower()
     if "afternoon" not in base:
@@ -88,7 +95,7 @@ def maybe_shift_workinghours_rows_12h(df: pd.DataFrame, src_fp: str) -> pd.DataF
     """
     WorkingHours CSVs (Mon/Tue/Wed) can contain PM times written without AM/PM.
     Shift only rows whose parsed hour is in [1..6] by +12h.
-    Afternoon files are handled separately by maybe_shift_afternoon_filename_12h.
+    Afternoon files are handled separately.
     """
     base = os.path.basename(src_fp).lower()
 
@@ -115,6 +122,7 @@ def maybe_shift_workinghours_rows_12h(df: pd.DataFrame, src_fp: str) -> pd.DataF
     return df
 
 def norm_proto_to_int(x) -> int:
+    """Normalise a protocol value (string or number) to an integer; returns -1 for unknown protocols."""
     if pd.isna(x):
         return -1
     s = str(x).strip().lower()
@@ -123,6 +131,7 @@ def norm_proto_to_int(x) -> int:
     return PROTO_MAP.get(s, -1)
 
 def make_key(src_ip, src_port, dst_ip, dst_port, proto_i) -> pd.Series:
+    """Build a 5-tuple string key for flow matching."""
     return (
         src_ip.astype(str) + "|" + src_port.astype(str) + "|" +
         dst_ip.astype(str) + "|" + dst_port.astype(str) + "|" +
@@ -130,10 +139,12 @@ def make_key(src_ip, src_port, dst_ip, dst_port, proto_i) -> pd.Series:
     )
 
 def _stable_sort_for_asof(df: pd.DataFrame, by_cols: List[str]) -> pd.DataFrame:
+    """Sort df by by_cols using a stable algorithm so merge_asof produces deterministic results."""
     df = df.sort_values(by_cols, kind="mergesort")
     return df.reset_index(drop=True)
 
 def find_label_files_for_day(labels_dir: str, day: str) -> List[str]:
+    """Glob for CICIDS2017 label CSVs matching a given weekday name under labels_dir."""
     pats = [
         os.path.join(labels_dir, f"*{day}*pcap_ISCX.csv"),
         os.path.join(labels_dir, f"*{day.lower()}*pcap_ISCX.csv"),
@@ -144,6 +155,7 @@ def find_label_files_for_day(labels_dir: str, day: str) -> List[str]:
     return sorted(set(out), key=lambda p: p.lower())
 
 def load_labels_for_day(labels_dir: str, day: str) -> pd.DataFrame:
+    """Load, parse, and deduplicate all label CSVs for a given day into a single label DataFrame."""
     files = find_label_files_for_day(labels_dir, day)
     if not files:
         raise FileNotFoundError(f"No label CSVs found for day={day} under {labels_dir}")
@@ -184,13 +196,13 @@ def load_labels_for_day(labels_dir: str, day: str) -> pd.DataFrame:
         df["key"] = make_key(df["Source IP"], df["Source Port"], df["Destination IP"], df["Destination Port"], df["Protocol"])
         df["key_rev"] = make_key(df["Destination IP"], df["Destination Port"], df["Source IP"], df["Source Port"], df["Protocol"])
 
-        # Index labels by both directions so Zeek flows match regardless of who initiated.
+        # Index by both forward and reverse 5-tuple so Zeek flows match regardless of which side initiated.
         fwd = df[["ts", "key", "label_family", "label_raw", "is_attack"]].rename(columns={"key": "k"})
         rev = df[["ts", "key_rev", "label_family", "label_raw", "is_attack"]].rename(columns={"key_rev": "k"})
         lab_any = pd.concat([fwd, rev], ignore_index=True)
         lab_any["k"] = lab_any["k"].astype(str)
 
-        # Keep attack labels over benign when the same ts+key appears in both directions.
+        # When forward and reverse entries share the same ts+key, keep the attack label (higher is_attack wins).
         lab_any = lab_any.sort_values(["is_attack"], ascending=False)
         lab_any = lab_any.drop_duplicates(subset=["ts", "k"], keep="first")
 
@@ -208,17 +220,20 @@ def load_labels_for_day(labels_dir: str, day: str) -> pd.DataFrame:
     return lab
 
 def read_run_meta(run_dir: str) -> dict:
+    """Read the run_meta.json produced by netmon for a given capture run directory."""
     meta_path = os.path.join(run_dir, "run_meta.json")
     with open(meta_path, "r") as f:
         return json.load(f)
 
 def run_time_range(merged_csv: str) -> Tuple[float, float]:
+    """Return the (min_ts, max_ts) Unix timestamp range from the merged CSV produced by a capture run."""
     df = pd.read_csv(merged_csv, usecols=["ts"], low_memory=False)
     df["ts"] = pd.to_numeric(df["ts"], errors="coerce")
     df = df.dropna(subset=["ts"])
     return float(df["ts"].min()), float(df["ts"].max())
 
 def compute_offset(run_ts_min: float, lab_ts_min: float) -> int:
+    """Compute the integer-second shift needed to align label timestamps to the run's clock."""
     return int(round(run_ts_min - lab_ts_min))
 
 def merge_two_pass(df: pd.DataFrame, lab_any: pd.DataFrame, offset: int, tol_s: int) -> pd.DataFrame:
@@ -284,6 +299,7 @@ def _sample_score_shift(
     tol_s: int,
     sample_rows: int,
 ) -> Tuple[int, int]:
+    """Score candidate timestamp offsets on a sample of rows and return the best shift pair."""
     needed = ["ts", "duration", "orig_h", "orig_p", "resp_h", "resp_p", "proto"]
     df = pd.read_csv(merged_csv, low_memory=False, nrows=sample_rows, usecols=lambda c: c in set(needed))
     df = df.copy()
@@ -360,6 +376,7 @@ def label_run_chunked(
     shift_sample_rows: int,
     day_override: Optional[str] = None,
 ) -> str:
+    """Label merged.csv rows by joining against CICIDS2017 labels in streaming chunks."""
     run_dir = run_dir.rstrip("/")
     merged_csv = os.path.join(run_dir, "merged.csv")
     meta = read_run_meta(run_dir)
@@ -448,9 +465,6 @@ def label_run_chunked(
     known = 0
     attacks = 0
 
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
     writer: Optional[pq.ParquetWriter] = None
 
     for chunk in pd.read_csv(merged_csv, low_memory=False, chunksize=chunksize, usecols=usecols):
@@ -517,9 +531,7 @@ def label_run_chunked(
     return out_path
 
 def combine_parquets(out_files: List[str], combined_out: str) -> None:
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
+    """Concatenate per-run labeled parquet files into one combined output file."""
     os.makedirs(os.path.dirname(combined_out), exist_ok=True)
 
     if os.path.exists(combined_out):
@@ -543,6 +555,7 @@ def combine_parquets(out_files: List[str], combined_out: str) -> None:
     print(f"[*] Wrote combined labeled dataset: {combined_out} rows={rows}")
 
 def main():
+    """CLI entry point. Labels one or more capture runs against CICIDS2017 and optionally combines them."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", nargs="+", required=True, help="run directories (each must contain merged.csv + run_meta.json)")
     ap.add_argument("--labels_dir", required=True, help="CICIDS2017 TrafficLabelling directory")

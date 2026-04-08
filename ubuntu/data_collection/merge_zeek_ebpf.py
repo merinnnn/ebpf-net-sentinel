@@ -135,6 +135,8 @@ def detect_replay_scenario(zeek_df: pd.DataFrame, ebpf_df: pd.DataFrame, debug: 
 
     compression = zeek_span / ebpf_span
 
+    # Classify replay speed by how much the Zeek timeline is compressed relative to the eBPF capture window.
+    # >500x means tcpreplay at maximum rate; <=2x is indistinguishable from live traffic.
     if compression > 500:
         replay_type = "topspeed"
         is_replay = True
@@ -362,6 +364,7 @@ def apply_time_filter(merged: pd.DataFrame, time_slop: float, is_replay: bool, d
 
 
 def _col(df, name, default):
+    """Return the eBPF-prefixed column if present, then the bare column, otherwise a constant-default Series."""
     if f"ebpf_{name}" in df.columns:
         return df[f"ebpf_{name}"]
     if name in df.columns:
@@ -449,6 +452,7 @@ def run_merge(
     merged[out_cols].to_csv(out, index=False)
 
 def main():
+    """CLI entry point. Loads Zeek and eBPF data, detects replay, aligns timestamps, and writes the merged CSV."""
     ap = argparse.ArgumentParser(description="Merge Zeek conn.csv and eBPF JSONL flows with replay detection")
     ap.add_argument("--zeek_conn", required=True, help="Zeek conn.csv file")
     ap.add_argument("--ebpf_agg", required=True, help="eBPF aggregated JSONL file")
