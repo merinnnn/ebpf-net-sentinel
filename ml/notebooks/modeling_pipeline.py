@@ -52,12 +52,14 @@ def load_split(
     test_file: str = "test.parquet",
     columns: List[str] | None = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Load train, val, and test parquet files from splits_dir; return them as a tuple."""
     train = pd.read_parquet(splits_dir / "train.parquet", columns=columns)
     val = pd.read_parquet(splits_dir / "val.parquet", columns=columns)
     test = pd.read_parquet(splits_dir / test_file, columns=columns)
     return train, val, test
 
 def prepare_split(df: pd.DataFrame, feature_list: List[str] | None = None) -> PreparedSplit:
+    """Drop metadata columns, select numeric features; return a PreparedSplit with X, y, and labels."""
     X = df.drop(columns=DROP_COLS, errors="ignore")
     num_cols = [c for c in X.columns if pd.api.types.is_numeric_dtype(X[c]) and not X[c].isna().all()]
     if feature_list is not None:
@@ -68,6 +70,7 @@ def prepare_split(df: pd.DataFrame, feature_list: List[str] | None = None) -> Pr
     return PreparedSplit(X=X, y=y, labels=labels, features=num_cols)
 
 def align_to_features(X: pd.DataFrame, features: List[str]) -> pd.DataFrame:
+    """Re-index X to exactly the columns in features, inserting zeros for any that are missing."""
     out = X.copy()
     for c in features:
         if c not in out.columns:
@@ -75,6 +78,7 @@ def align_to_features(X: pd.DataFrame, features: List[str]) -> pd.DataFrame:
     return out[features]
 
 def binary_metrics(y_true: np.ndarray, y_pred: np.ndarray, y_prob: np.ndarray | None = None) -> Dict[str, float | None]:
+    """Return a dict of classification metrics including FPR, confusion matrix counts, and optionally AUC scores."""
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
     fpr = float(fp / max(fp + tn, 1))
     metrics: Dict[str, float | None] = {
@@ -145,6 +149,7 @@ def select_threshold(
     target_fpr: float = 0.001,
     target_recall: float | None = None,
 ) -> float:
+    """Dispatch to the appropriate threshold-selection strategy ('f1', 'fpr', or 'recall')."""
     mode = str(threshold_mode).lower()
     if mode == "fpr":
         return tune_threshold_for_fpr(y_val, y_prob_val, target_fpr=target_fpr)
@@ -157,6 +162,7 @@ def select_threshold(
     return tune_threshold_on_val(y_val, y_prob_val)
 
 def metrics_at_threshold(y_true: np.ndarray, y_score: np.ndarray, threshold: float) -> Dict[str, float | None]:
+    """Apply a fixed threshold to scores and return binary_metrics with the threshold value included."""
     y_pred = (y_score >= float(threshold)).astype(int)
     metrics = binary_metrics(y_true, y_pred, y_score)
     metrics["threshold"] = float(threshold)
@@ -220,8 +226,10 @@ def model_candidates(seed: int = 104) -> Dict[str, Pipeline]:
     }
 
 def _predict_scores(model: Pipeline, X: pd.DataFrame) -> np.ndarray:
+    """Return probability scores [0,1]. Models without predict_proba are min-max normalised."""
     if hasattr(model, "predict_proba"):
         return model.predict_proba(X)[:, 1]
+    # Normalise decision_function output to [0,1] so it is comparable with probability scores.
     score = model.decision_function(X)
     score = (score - np.min(score)) / (np.max(score) - np.min(score) + 1e-12)
     return score
@@ -229,11 +237,12 @@ def _predict_scores(model: Pipeline, X: pd.DataFrame) -> np.ndarray:
 def evaluate_candidate(model: Pipeline, X_tr: pd.DataFrame, y_tr: np.ndarray, X_va: pd.DataFrame, y_va: np.ndarray,
                        *, threshold_mode: str = "f1", target_fpr: float = 0.001,
                        target_recall: float | None = None) -> dict:
+    """Fit model on training data, tune threshold on validation, and return metrics plus a selection score."""
     model.fit(X_tr, y_tr)
     tr_prob = _predict_scores(model, X_tr)
     va_prob = _predict_scores(model, X_va)
 
-    # Choose decision threshold on validation
+    # Threshold is chosen on val so test metrics remain unseen during selection.
     best_thr = select_threshold(
         y_va,
         va_prob,
@@ -251,6 +260,7 @@ def evaluate_candidate(model: Pipeline, X_tr: pd.DataFrame, y_tr: np.ndarray, X_
     va_auc = va["roc_auc"] if va["roc_auc"] is not None else 0.0
     gap_auc = float(max(0.0, tr_auc - va_auc))
     gap_f1 = float(max(0.0, tr["f1"] - va["f1"]))
+    # Selection score = val AUC penalised for overfitting (train-val gaps in AUC and F1).
     score = float(va_auc - 0.50 * gap_auc - 0.25 * gap_f1)
 
     return {
@@ -268,6 +278,7 @@ def evaluate_candidate(model: Pipeline, X_tr: pd.DataFrame, y_tr: np.ndarray, X_
     }
 
 def rank_models(X_tr: pd.DataFrame, y_tr: np.ndarray, X_va: pd.DataFrame, y_va: np.ndarray, seed: int = 104):
+    """Fit all candidate models, rank them by selection score, and return the best name, its result dict, and the leaderboard."""
     rows = []
     fitted = {}
     for name, model in model_candidates(seed).items():
@@ -297,6 +308,7 @@ def bootstrap_metric_ci(
     n_boot: int = 300,
     seed: int = 104,
 ) -> Dict[str, float | None]:
+    """Estimate mean and 95% CI for a metric via bootstrap resampling."""
     if len(y_true) == 0:
         return {"mean": None, "low": None, "high": None, "n_boot": 0}
 
@@ -327,6 +339,7 @@ def bootstrap_metric_ci(
     }
 
 def load_model_pack(fs_name: str, *, artifact: str = "headline", seed: int = 104) -> dict:
+    """Load a saved model pack (model + features + threshold) by feature-set name and artifact type."""
     from ml.notebooks.experiment_config import MODELS_DIR
 
     artifact_map = {
@@ -362,6 +375,7 @@ def load_model_pack(fs_name: str, *, artifact: str = "headline", seed: int = 104
     )
 
 def evaluate_saved_pack(pack: dict, df: pd.DataFrame) -> Dict[str, object]:
+    """Score a DataFrame using a pre-loaded model pack and return predictions, scores, and metrics."""
     prep = prepare_split(df, feature_list=pack["features"])
     X = align_to_features(prep.X, pack["features"])
     score = _predict_scores(pack["model"], X)
@@ -389,6 +403,7 @@ def fit_model_family_on_split(
     target_fpr: float = 0.001,
     target_recall: float | None = None,
 ) -> Dict[str, object]:
+    """Load a split, fit one candidate model, tune its threshold, and return train/val/test metrics and artefacts."""
     load_cols = None
     if feature_list is not None:
         load_cols = list(dict.fromkeys(["label_family", "is_attack", *feature_list]))
@@ -451,6 +466,7 @@ def fit_model_family_on_split(
     }
 
 def per_attack_detection_rates(model: Pipeline, X: pd.DataFrame, labels: pd.Series) -> pd.DataFrame:
+    """Return a DataFrame with detection count and rate for each non-benign attack family."""
     pred = model.predict(X)
     rows = []
     for attack in sorted(labels.unique()):

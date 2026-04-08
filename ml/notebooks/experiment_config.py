@@ -1,20 +1,13 @@
 #!/usr/bin/env python3
 """
-Single source of truth for all experiment notebooks.
-
-Current split roles
-1  split1_group_strat_*      DIAGNOSTIC    leakage-safe host-pair stress test
-2  split2_balanced_quota_*   TRAINING      model selection / threshold tuning
-3  split3_train_resampled_*  ABLATION      rare-class learning variant, same test style as Split 1
-4  split4_dual_eval_*        HEADLINE      balanced + realistic final evaluation
-5  split5_kfold_*            ROBUSTNESS    mean +/- std over repeated grouped folds
-"""
+Single source of truth for experiment paths, split roles, and hyperparameters."""
 from pathlib import Path
 import os
 
 # Repo root
 # Walk upward from this file's directory until we find the repo root
 def _find_repo_root(start: Path) -> Path:
+    """Walk upward from start until a directory containing both ml/ and data/ is found."""
     for p in [start] + list(start.parents):
         if (p / "ml").exists() and (p / "data").exists():
             return p
@@ -83,6 +76,7 @@ SPLITS_BASELINE = MODEL_SELECTION_SPLITS_BASELINE
 SPLITS_EBPF     = MODEL_SELECTION_SPLITS_EBPF
 
 def run_name(prefix: str, model: str) -> str:
+    """Build a canonical run identifier from a dataset prefix, current split tag, and model name."""
     return f"{prefix}_{SPLIT_TAG}_{model}"
 
 # Model hyperparameters
