@@ -56,7 +56,7 @@ def parse_json(in_path: Path, out_path: Path) -> int:
     return n
 
 def parse_tsv(in_path: Path, out_path: Path) -> int:
-    """Convert a Zeek TSV conn.log (with #fields header) to a normalised CSV and return the row count."""
+    """Convert a Zeek TSV conn.log to a normalised CSV and return the row count."""
     fields = None
     sep = "\t"
     n = 0

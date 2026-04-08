@@ -123,10 +123,7 @@ def load_ebpf_agg(jsonl: str) -> pd.DataFrame:
     return _process_ebpf_rows(rows)
 
 def detect_replay_scenario(zeek_df: pd.DataFrame, ebpf_df: pd.DataFrame, debug: bool = False):
-    """
-    Detect PCAP replay from time compression (Zeek span / eBPF span).
-    Returns (is_replay, compression_ratio, replay_type).
-    """
+    """Detect PCAP replay from Zeek/eBPF time compression; return (is_replay, ratio, replay_type)."""
     zeek_span = zeek_df["end_ts"].max() - zeek_df["start_ts"].min()
     ebpf_span = ebpf_df["last_ts_s"].max() - ebpf_df["first_ts_s"].min()
 
@@ -135,8 +132,7 @@ def detect_replay_scenario(zeek_df: pd.DataFrame, ebpf_df: pd.DataFrame, debug: 
 
     compression = zeek_span / ebpf_span
 
-    # Classify replay speed by how much the Zeek timeline is compressed relative to the eBPF capture window.
-    # >500x means tcpreplay at maximum rate; <=2x is indistinguishable from live traffic.
+    # >500x compression = tcpreplay at max rate; <=2x is indistinguishable from live traffic.
     if compression > 500:
         replay_type = "topspeed"
         is_replay = True
@@ -199,11 +195,7 @@ def synchronize_timestamps(zeek_df: pd.DataFrame, ebpf_df: pd.DataFrame, debug: 
 
 def match_flows_with_deduplication(zeek_df: pd.DataFrame, ebpf_df: pd.DataFrame,
                                    is_replay: bool, debug: bool = False):
-    """
-    Match Zeek and eBPF flows on 5-tuple.
-    Replay mode uses one-to-one matching to handle duplicate 5-tuples correctly.
-    Live mode uses a standard pandas merge with deduplication.
-    """
+    """Match Zeek and eBPF flows on 5-tuple; replay uses one-to-one, live uses merge+dedup."""
     zeek_df = zeek_df.copy()
     ebpf_df = ebpf_df.copy()
 
@@ -364,7 +356,7 @@ def apply_time_filter(merged: pd.DataFrame, time_slop: float, is_replay: bool, d
 
 
 def _col(df, name, default):
-    """Return the eBPF-prefixed column if present, then the bare column, otherwise a constant-default Series."""
+    """Return the eBPF-prefixed column, bare column, or a constant-default Series."""
     if f"ebpf_{name}" in df.columns:
         return df[f"ebpf_{name}"]
     if name in df.columns:
@@ -382,11 +374,7 @@ def run_merge(
     force_replay_mode: bool = False,
     zeek_df: "pd.DataFrame | None" = None,
 ) -> None:
-    """
-    In-process merge entry point for the daemon.
-    Accepts a pre-loaded eBPF DataFrame and optionally a pre-loaded Zeek DataFrame
-    to avoid re-reading files on every poll cycle.
-    """
+    """In-process merge entry point; accepts pre-loaded DataFrames to avoid re-reading files each poll."""
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
 
     if zeek_df is not None:
@@ -452,7 +440,7 @@ def run_merge(
     merged[out_cols].to_csv(out, index=False)
 
 def main():
-    """CLI entry point. Loads Zeek and eBPF data, detects replay, aligns timestamps, and writes the merged CSV."""
+    """CLI entry point. Merges Zeek and eBPF flows, detects replay, and writes the output CSV."""
     ap = argparse.ArgumentParser(description="Merge Zeek conn.csv and eBPF JSONL flows with replay detection")
     ap.add_argument("--zeek_conn", required=True, help="Zeek conn.csv file")
     ap.add_argument("--ebpf_agg", required=True, help="eBPF aggregated JSONL file")
