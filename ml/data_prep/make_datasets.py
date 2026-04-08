@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""
-Reads a merged Parquet and writes:
-  - baseline.parquet : Zeek features (+ day, label_family)
-  - enhanced.parquet : baseline + eBPF features (+ day, label_family)
-"""
+"""Read merged Parquet and write baseline.parquet (Zeek) and enhanced.parquet (Zeek + eBPF)."""
 
 from datetime import datetime
 import argparse
@@ -66,10 +62,7 @@ def looks_like_ebpf(col: str) -> bool:
     return any(h in c for h in EBPF_HINTS)
 
 def select_feature_columns(columns: List[str]) -> Tuple[List[str], List[str], List[str]]:
-    """
-    Split the source schema into baseline and eBPF-specific columns.
-    The baseline keeps every non-eBPF feature; enhanced appends the eBPF columns.
-    """
+    """Split schema into baseline (non-eBPF) and enhanced (baseline + eBPF) column sets."""
     baseline = []
     ebpf_cols = []
     for c in columns:
@@ -85,11 +78,7 @@ def select_feature_columns(columns: List[str]) -> Tuple[List[str], List[str], Li
 def _encode_categorical_ebpf(df: pd.DataFrame, ebpf_cols: list,
                               freq_maps: dict | None = None,
                               fit: bool = False) -> tuple:
-    """
-    Frequency-encode categorical eBPF columns (e.g. comm/exe).
-    When fit=True, freq_maps are fit on all rows, which leaks test-day frequencies.
-    Pass pre-fit freq_maps from make_train_aligned_encoding() to avoid this.
-    """
+    """Frequency-encode categorical eBPF columns; pass pre-fit freq_maps to avoid leakage."""
     cat_cols = [c for c in ebpf_cols if c in df.columns
                 and not pd.api.types.is_numeric_dtype(df[c])]
     if not cat_cols:
@@ -113,10 +102,7 @@ def make_train_aligned_encoding(
     ebpf_cols: list,
     batch_size: int = 131072,
 ) -> dict:
-    """
-    Compute frequency maps from a training-split parquet only (leakage-free).
-    Returns {col_name: {category: normalised_freq}} for use with _encode_categorical_ebpf(..., fit=False).
-    """
+    """Fit frequency maps on training parquet only; pass the result to _encode_categorical_ebpf to avoid leakage."""
     from collections import Counter
     counters: dict = {}
     for df in _iter_batches(str(train_parquet_path), batch_size, columns=ebpf_cols):
@@ -151,10 +137,7 @@ def build_datasets(
     drop_unknown: bool = True,
     batch_size: int = 131072,
 ) -> dict:
-    """
-    Build baseline/enhanced feature-set Parquets.
-    Notebook entry point (no argparse). Returns the metadata dict written to report_dir.
-    """
+    """Build baseline and enhanced Parquets; notebook entry point returning the metadata dict."""
     os.makedirs(os.path.dirname(out_baseline), exist_ok=True)
     os.makedirs(os.path.dirname(out_enhanced), exist_ok=True)
     os.makedirs(report_dir, exist_ok=True)
