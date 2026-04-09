@@ -11,7 +11,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     NETSENTINEL_DATA_DIR=/opt/netsentinel/data \
     NETSENTINEL_APP_CACHE_DIR=/opt/netsentinel/data/app \
     NETSENTINEL_DISABLE_EXTERNAL_FONTS=true \
-    NETSENTINEL_GENERATE_MOCK_LIVE_RUN=false \
     STREAMLIT_BROWSER_GATHER_USAGE_STATS=false \
     PATH=/opt/conda/bin:/opt/zeek/bin:/usr/local/go/bin:${PATH}
 

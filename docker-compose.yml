@@ -13,7 +13,6 @@ services:
       NETSENTINEL_DATA_DIR: /opt/netsentinel/data
       NETSENTINEL_APP_CACHE_DIR: /opt/netsentinel/data/app
       NETSENTINEL_DISABLE_EXTERNAL_FONTS: "true"
-      NETSENTINEL_GENERATE_MOCK_LIVE_RUN: "false"
       NETSENTINEL_AUTOSTART_LIVE_CAPTURE: "false"
       DISABLE_KPROBES: "0"
       POLL_SECS: "1"
