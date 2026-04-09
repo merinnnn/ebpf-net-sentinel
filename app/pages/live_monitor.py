@@ -1204,7 +1204,7 @@ def ingest(evs: list[dict]):
         S.graph_points.append({"ts_s": ts_val, "score": event_score(e)})
     if len(S.graph_points) > _MAX_GRAPH_POINTS:
         S.graph_points = S.graph_points[-_MAX_GRAPH_POINTS:]
-    S.events = list(reversed(evs[-50:])) + S.events
+    S.events = list(reversed(evs)) + S.events
     S.events = S.events[:300]
 
 def build_chart_frame(points: list[dict], window_s: int) -> pd.DataFrame:
@@ -1643,11 +1643,14 @@ if display_evs:
         exe        = "" if raw_exe.lower() in ("nan", "none", "") else raw_exe
         pid        = ev.get("pid", 0)
         pid_val    = int(pid) if str(pid) not in ("", "nan", "0") else 0
-        exe_cell   = exe if exe else ""
         if exe and pid_val:
             exe_cell = f"{exe} <span style='opacity:0.5'>pid:{pid_val}</span>"
         elif pid_val:
             exe_cell = f"<span style='opacity:0.5'>pid:{pid_val}</span>"
+        elif exe:
+            exe_cell = exe
+        else:
+            exe_cell = "<span style='opacity:0.8; font-size:1.4em; letter-spacing:2px'>---</span>"
         dur_raw    = ev.get("duration", 0.0)
         try:
             dur_f = float(dur_raw)
