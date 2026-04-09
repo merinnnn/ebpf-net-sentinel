@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Sends a high volume of TCP SYN packets to a target port, never completing the handshake.
+# Flood a target port with TCP SYN packets without completing the handshake.
 # Usage: sudo bash ubuntu/test/syn_flood.sh [port] [duration_secs]
 #   defaults: port=80, duration=10
 
