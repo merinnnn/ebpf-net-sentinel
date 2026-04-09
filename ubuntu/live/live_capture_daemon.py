@@ -140,7 +140,7 @@ PROTO_MAP = {"tcp": 6.0, "udp": 17.0, "icmp": 1.0}
 _MAX_EBPF_CACHE = 50_000
 
 # CICIDS2017 replay feature ranges differ from live traffic; scale thresholds down.
-_DEFAULT_THRESHOLD_MULTIPLIER = float(os.environ.get("SCORE_THRESHOLD_MULTIPLIER", "0.1"))
+_DEFAULT_THRESHOLD_MULTIPLIER = float(os.environ.get("SCORE_THRESHOLD_MULTIPLIER", "0.5"))
 
 
 class LiveScorer:

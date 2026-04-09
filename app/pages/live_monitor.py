@@ -677,7 +677,7 @@ def start_live_capture(iface: str) -> tuple[bool, str]:
         "--flush-secs",                 os.environ.get("FLUSH_SECS", "5"),
         "--poll-secs",                  os.environ.get("POLL_SECS",  "3"),
         "--mode",                       os.environ.get("MODE",       "both"),
-        "--score-threshold-multiplier", os.environ.get("SCORE_THRESHOLD_MULTIPLIER", "0.1"),
+        "--score-threshold-multiplier", os.environ.get("SCORE_THRESHOLD_MULTIPLIER", "0.5"),
     ]
     DAEMON_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     log_fh = DAEMON_LOG_PATH.open("a", encoding="utf-8")
@@ -1323,6 +1323,7 @@ with st.sidebar:
             _, msg = stop_live_capture()
             S.capture_feedback = msg
             S.last_action_time = time.time()
+            S.is_live = False  # halt webapp polling immediately
             st.rerun()
 
     sb_c3, sb_c4 = st.columns(2)
