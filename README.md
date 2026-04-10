@@ -14,7 +14,7 @@ Data collection pipeline and web app need a **Linux native host** supporting eBP
 
 ## Folder Structure
 
-```text
+```bash
 ebpf-net-sentinel/
 ├── app/
 │   ├── app.py
@@ -131,6 +131,29 @@ sudo bash ubuntu/setup/setup_veth.sh veth0 veth1 9000
 ```
 
 Download the CICIDS2017 dataset from the [Canadian Institute for Cybersecurity](https://www.unb.ca/cic/datasets/ids-2017.html) and place the PCAPs and label CSVs at: [https://www.unb.ca/cic/datasets/ids-2017.html](https://www.unb.ca/cic/datasets/ids-2017.html)
+
+Once downloaded the dataset organise it as follows:
+
+``` bash
+data
+├── cicids2017_csv
+│   └── GeneratedLabelledFlows
+│       └── TrafficLabelling
+│           ├── Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv
+│           ├── Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv
+│           ├── Friday-WorkingHours-Morning.pcap_ISCX.csv
+│           ├── Monday-WorkingHours.pcap_ISCX.csv
+│           ├── Thursday-WorkingHours-Afternoon-Infilteration.pcap_ISCX.csv
+│           ├── Thursday-WorkingHours-Morning-WebAttacks.pcap_ISCX.csv
+│           ├── Tuesday-WorkingHours.pcap_ISCX.csv
+│           └── Wednesday-workingHours.pcap_ISCX.csv
+└── cicids2017_pcap
+    ├── Friday-WorkingHours.pcap
+    ├── Monday-WorkingHours.pcap
+    ├── Thursday-WorkingHours.pcap
+    ├── Tuesday-WorkingHours.pcap
+    └── Wednesday-WorkingHours.pcap
+```
 
 ### Running the Full Pipeline (all 5 days)
 
