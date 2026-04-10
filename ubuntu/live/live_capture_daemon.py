@@ -133,7 +133,6 @@ class LivePaths:
     merged_csv: Path
     run_meta: Path
 
-
 PROTO_MAP = {"tcp": 6.0, "udp": 17.0, "icmp": 1.0}
 
 # Max eBPF flow entries in memory; SYN floods can spike to 600k+ so cap prevents DataFrame bloat.
@@ -141,7 +140,6 @@ _MAX_EBPF_CACHE = 50_000
 
 # CICIDS2017 replay feature ranges differ from live traffic; scale thresholds down.
 _DEFAULT_THRESHOLD_MULTIPLIER = float(os.environ.get("SCORE_THRESHOLD_MULTIPLIER", "0.5"))
-
 
 class LiveScorer:
     def __init__(self, repo: Path, paths: LivePaths,
@@ -969,7 +967,6 @@ class LiveCaptureDaemon:
             append_log(f"final refresh failed: {exc}")
         self.write_state(status, message)
         info(message)
-
 
 def install_signal_handlers(daemon: LiveCaptureDaemon) -> None:
     """Register SIGINT and SIGTERM handlers that call daemon.stop()."""
