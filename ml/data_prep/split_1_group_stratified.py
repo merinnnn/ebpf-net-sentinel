@@ -12,7 +12,6 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-
 LABEL_COL  = "label_family"
 ATTACK_COL = "is_attack"
 GROUP_COLS = ("orig_h", "resp_h")
@@ -25,7 +24,6 @@ def _iter_batches(parquet_path: str, batch_size: int, columns=None):
     for batch in pf.iter_batches(batch_size=batch_size, columns=columns):
         yield batch.to_pandas()
 
-
 def _dominant_label(s: pd.Series) -> str:
     """Return the dominant label for a group; attack labels take priority over BENIGN."""
     vc = s.astype(str).value_counts(dropna=False)
@@ -33,7 +31,6 @@ def _dominant_label(s: pd.Series) -> str:
         if str(k) not in BENIGN_LIKE:
             return str(k)
     return str(vc.index[0]) if len(vc) else "Unknown"
-
 
 def build_group_table(in_parquet: str, batch_size: int = 131072) -> pd.DataFrame:
     """
@@ -89,7 +86,6 @@ def build_group_table(in_parquet: str, batch_size: int = 131072) -> pd.DataFrame
         })
     return pd.DataFrame(rows)
 
-
 def assign_groups_row_weighted(
     grp: pd.DataFrame,
     *,
@@ -130,7 +126,6 @@ def assign_groups_row_weighted(
 
     return assignments
 
-
 def assign_groups_naive_stratified(
     grp: pd.DataFrame, *, train_ratio: float, val_ratio: float, seed: int
 ):
@@ -153,7 +148,6 @@ def assign_groups_naive_stratified(
         "val":   g_val["_gid"].tolist(),
         "test":  g_test["_gid"].tolist(),
     }
-
 
 def write_splits_streaming(
     *,
@@ -228,7 +222,6 @@ def make_report(stats: Dict[str, Dict[str, int]]) -> Dict[str, Dict[str, int]]:
         for split, v in stats.items()
     }
 
-
 def run(
     *,
     in_parquet: str,
@@ -271,7 +264,6 @@ def run(
     out_path.mkdir(parents=True, exist_ok=True)
     (out_path / "split_report.json").write_text(json.dumps(report, indent=2))
     return out_path
-
 
 def main():
     """CLI entry point. Parses arguments and runs the group-stratified split builder."""
@@ -338,7 +330,6 @@ def main():
     print("[*] Done.")
     for s in ["train", "val", "test"]:
         print(f"  {s:5s}: rows={stats[s]['rows']:,} attacks={stats[s]['attacks']:,}")
-
 
 if __name__ == "__main__":
     main()

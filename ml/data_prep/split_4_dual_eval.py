@@ -60,7 +60,6 @@ def run(
         if _cleanup:
             _os.unlink(_in)
 
-
 def load_report(out_dir: str):
     """Load the split report for a previously written Split 4 directory."""
     p = Path(out_dir) / "split_report.json"
@@ -120,7 +119,6 @@ def _to_schema_table(df: pd.DataFrame, schema: pa.Schema) -> pa.Table:
     if tbl.schema != schema:
         tbl = tbl.cast(schema, safe=False)
     return tbl
-
 
 def write_split(
     *,

@@ -42,12 +42,10 @@ def run(
         batch_size=batch_size,
     )
 
-
 def load_report(out_dir: str):
     """Load split_report.json as dict."""
     p = Path(out_dir) / "split_report.json"
     return json.loads(p.read_text())
-
 
 def _reservoir_update(res, k, row_dict, seen, rng):
     """Maintain a uniform reservoir sample of size k from a streaming sequence."""
@@ -95,7 +93,6 @@ def make_report(parts: dict) -> dict:
         rep[k] = {str(idx): int(v) for idx, v in vc.items()}
     return rep
 
-
 def _collapse_rare_for_stratify(y: pd.Series, min_count: int = 2, other: str = "RARE") -> pd.Series:
     """Collapse ultra-rare classes so stratified splitting does not crash."""
     y   = y.astype(str)
@@ -105,7 +102,6 @@ def _collapse_rare_for_stratify(y: pd.Series, min_count: int = 2, other: str = "
         return y
     return y.where(~y.isin(rare), other=other)
 
-
 def _can_stratify(y: pd.Series, min_count: int = 2) -> bool:
     """Check whether every class has enough rows for sklearn stratification."""
     y = y.astype(str)
@@ -113,7 +109,6 @@ def _can_stratify(y: pd.Series, min_count: int = 2) -> bool:
         return False
     vc = y.value_counts(dropna=False)
     return int(vc.min()) >= min_count
-
 
 def _safe_train_test_split(df: pd.DataFrame, *, test_size: float, seed: int, y: pd.Series):
     """Best-effort stratification with fallback for tiny datasets."""
@@ -134,7 +129,6 @@ def _safe_train_test_split(df: pd.DataFrame, *, test_size: float, seed: int, y: 
         idx     = np.arange(n)
         rng.shuffle(idx)
         return df.iloc[idx[n_test:]].copy(), df.iloc[idx[:n_test]].copy()
-
 
 def run_streaming(
     in_parquet: str,
@@ -238,7 +232,6 @@ def run_streaming(
                        targets={**{k: int(v) for k, v in target.items()}, "BENIGN": int(target_benign)},
                        batch_size=int(batch_size))
     return {**out_parts, "meta": meta}
-
 
 def write_split(
     *,
