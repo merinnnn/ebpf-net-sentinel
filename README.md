@@ -282,7 +282,12 @@ joblib==1.5.3
 pyarrow==23.0.0
 ```
 
-### Running the Web App (Docker Compose)
+### Building and Running the Web App (Docker Compose)
+
+```bash
+# From the repo root
+docker compose build --no-cache
+```
 
 ```bash
 # From the repo root
