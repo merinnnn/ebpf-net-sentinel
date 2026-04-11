@@ -77,6 +77,9 @@ ebpf-net-sentinel/
 │   │   └── vmlinux.h
 │   ├── cmd/
 │   │   └── netmon/
+│   │       ├── main.go
+│   │       ├── go.mod
+│   │       └── go.sum
 │   └── Makefile
 │
 ├── docker/
@@ -310,10 +313,6 @@ pyarrow==23.0.0
 ```bash
 # From the repo root
 docker compose build --no-cache
-```
-
-```bash
-# From the repo root
 docker compose up --build
 ```
 
