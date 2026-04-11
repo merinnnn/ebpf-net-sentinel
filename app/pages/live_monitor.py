@@ -27,6 +27,7 @@ def get_repo_root() -> Path:
 REPO = get_repo_root()
 RUNTIME_STATE_PATH = REPO / "data" / "runtime" / "live_capture_state.json"
 DAEMON_LOG_PATH    = REPO / "data" / "runtime" / "live_capture_launcher.log"
+_UI_SETTINGS_PATH  = REPO / "data" / "ui_settings.json"
 
 # Seconds updated_at may lag before the daemon is considered stalled.
 # Conservative: daemon can block in run_sync() for 10-30s plus poll_secs.
@@ -912,6 +913,26 @@ def sync_live_source_from_runtime() -> None:
     rd = rt.get("run_dir")
     S.run_dir = str(_rebase_daemon_path(rd)) if rd else ""
 
+_UI_SETTINGS_KEYS = ["threshold", "model", "source", "file_path",
+                     "poll_interval", "graph_window_s", "filter_anom", "iface"]
+
+def _save_ui_settings() -> None:
+    """Persist sidebar settings to disk so they survive a page refresh."""
+    try:
+        data = {k: st.session_state[k] for k in _UI_SETTINGS_KEYS if k in st.session_state}
+        tmp = _UI_SETTINGS_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        tmp.replace(_UI_SETTINGS_PATH)
+    except Exception:
+        pass
+
+def _load_ui_settings() -> dict:
+    """Load previously saved sidebar settings, returning an empty dict on any error."""
+    try:
+        return json.loads(_UI_SETTINGS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
 def _init():
     """Initialise Streamlit session state with defaults on first page load."""
     rt     = load_runtime_state()
@@ -943,6 +964,8 @@ def _init():
         "loaded_model":       "",
         "loaded_threshold":   None,
     }
+    saved = _load_ui_settings()
+    defaults.update({k: v for k, v in saved.items() if k in defaults})
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
@@ -1402,6 +1425,7 @@ with st.sidebar:
         current_window_label = window_labels[2]
     selected_window_label = st.selectbox("Graph window", window_labels, index=window_labels.index(current_window_label))
     S.graph_window_s = dict(GRAPH_WINDOW_OPTIONS)[selected_window_label]
+    _save_ui_settings()
 
 # Main Content
 # Title banner
