@@ -1340,13 +1340,15 @@ with st.sidebar:
             _, msg = start_live_capture(S.iface)
             S.capture_feedback = msg
             S.last_action_time = time.time()
+            S.is_live = True
             st.rerun()
     with sb_c2:
         if st.button("Stop", disabled=not capture_running, use_container_width=True):
             _, msg = stop_live_capture()
             S.capture_feedback = msg
             S.last_action_time = time.time()
-            S.is_live = False  # halt webapp polling immediately
+            S.last_stop_time = time.time()
+            S.is_live = False
             st.rerun()
 
     sb_c3, sb_c4 = st.columns(2)
@@ -1817,7 +1819,15 @@ if S.is_live:
         in_transition = (time.time() - (S.last_action_time or 0)) < 12
         should_refresh = capture_state in {"running", "starting", "stalled"} or in_transition
     elif S.source == "File":
-        should_refresh = bool(S.file_path)
+        # Only refresh while there is still unread data in the file.
+        try:
+            should_refresh = bool(S.file_path) and resolve_repo_path(S.file_path).stat().st_size > S.file_offset
+        except Exception:
+            should_refresh = False
+elif S.source == "Live":
+    # After Stop: keep refreshing briefly so the daemon-death badge updates.
+    stopping = (time.time() - getattr(S, "last_stop_time", 0)) < 8
+    should_refresh = stopping
 
 if should_refresh:
     # If a full chunk is consumed, there is more data pending.
