@@ -359,6 +359,10 @@ Each script sends traffic from inside the namespace toward the host, triggering 
 | `sudo bash ubuntu/test/web_attacks.sh` | Web attacks (XSS, SQLi, brute force) |
 | `sudo bash ubuntu/test/benign.sh` | Benign traffic baseline |
 
+### Running Tests in File Mode
+
+If in File Mode (Settings -> Source -> Mode -> File), update `JSONL file path` with the path of a `scored_events.jsonl` produced by a previous live iteration.
+
 #### Teardown
 
 ```bash
